@@ -1,6 +1,6 @@
 # 0012. Match the reference's behavior, with listed deviations
 
-- Status: Accepted
+- Status: Accepted; the "header values are raw" point is superseded by [0019](0019-decoded-sanitized-header-values.md)
 - Date: 2026-10-07
 
 ## Context

@@ -36,7 +36,7 @@ fn imapModule(b: *std.Build, root: []const u8, target: std.Build.ResolvedTarget,
     });
     mod.addIncludePath(b.path("src/c"));
     mod.addCSourceFiles(.{
-        .files = &.{ "src/c/session.c", "src/c/mime.c" },
+        .files = &.{ "src/c/session.c", "src/c/mime.c", "src/c/regex.c" },
         .flags = &.{ "-std=c11", "-D_DEFAULT_SOURCE", "-Wall", "-Wextra", "-Werror" },
     });
     mod.linkSystemLibrary("etpan", .{});

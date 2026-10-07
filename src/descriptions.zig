@@ -8,8 +8,14 @@ pub const list_accounts =
     \\names as its `account` argument.
     \\
     \\Return:
-    \\    [ {"name": "tetra", "login": "me@example.org", "readonly": false}, ... ]
+    \\    [ {"name": "tetra", "login": "me@example.org", "readonly": false,
+    \\       "filters": ["password_reset"]}, ... ]
     \\    readonly accounts refuse change_keywords and create_message.
+    \\    filters are the account's active sensitive-content filters. Messages
+    \\    they match are withheld: get_text/get_html return
+    \\    [withheld by filter "<name>"] and get_header shows only date and from.
+    \\    The built-in password_reset filter matches subjects about password
+    \\    resets and account recovery.
 ;
 
 pub const whoami =
@@ -130,6 +136,23 @@ const uids_note =
     \\order, null for a UID that does not exist in the mailbox.
 ;
 
+const sanitized_note =
+    \\
+    \\Output is sanitized: plain text only, hidden HTML content and invisible
+    \\Unicode removed, links shown as "text (url)". Long bodies end with
+    \\"[truncated: N bytes omitted]". If the response grows too large, later
+    \\items are replaced by "[omitted: response size limit reached; request
+    \\fewer UIDs]" -- ask again for those UIDs in a smaller batch.
+;
+
+const withheld_note =
+    \\
+    \\A message matched by one of the account's sensitive-content filters (see
+    \\list_accounts) is withheld: its content is never downloaded and you get
+    \\[withheld by filter "<name>"] instead. Tell the user the message exists
+    \\but is withheld; do not retry or try to work around it.
+;
+
 pub const get_header =
     \\Read message headers for the given UIDs in directory.
     \\
@@ -138,9 +161,10 @@ pub const get_header =
 ++ "\n" ++ uids_note ++
     \\
     \\Return:
-    \\    list of {lowercased header name: [raw values]} (RFC 2047
-    \\    encoded-words are not decoded)
-;
+    \\    list of {lowercased header name: [values]}. Values are decoded
+    \\    (RFC 2047) and sanitized. For a withheld message only date and from
+    \\    are returned, plus "x-tp-imap-mcp-withheld": ["<filter>"].
+++ sanitized_note ++ withheld_note;
 
 pub const get_header_field =
     \\Read one header field for the given UIDs in directory.
@@ -151,26 +175,30 @@ pub const get_header_field =
 ++ "\n" ++ uids_note ++
     \\
     \\Return:
-    \\    list of [raw values]; [] when the message lacks the field
-;
+    \\    list of [values] (decoded, sanitized); [] when the message lacks the
+    \\    field. For a withheld message, fields other than date and from return
+    \\    the marker.
+++ sanitized_note ++ withheld_note;
 
 pub const get_text =
     \\Read the plain text body for the given UIDs in directory. Concatenates
-    \\every text/plain part that is not an attachment. Charset is UTF-8.
+    \\every text/plain part that is not an attachment; if there is none, the
+    \\HTML part converted to plain text. Charset is UTF-8.
     \\Encrypted (PGP/MIME) messages are not decrypted; a marker is returned.
     \\
     \\Args:
     \\    directory: directory to read from
-++ "\n" ++ uids_note;
+++ "\n" ++ uids_note ++ sanitized_note ++ withheld_note;
 
 pub const get_html =
-    \\Read the HTML body for the given UIDs in directory. Concatenates every
-    \\text/html part that is not an attachment. Charset is UTF-8.
+    \\Read the HTML body for the given UIDs in directory, converted to plain
+    \\text (no markup is returned). Concatenates every text/html part that
+    \\is not an attachment; "" if the message has no HTML part.
     \\Encrypted (PGP/MIME) messages are not decrypted; a marker is returned.
     \\
     \\Args:
     \\    directory: directory to read from
-++ "\n" ++ uids_note;
+++ "\n" ++ uids_note ++ sanitized_note ++ withheld_note;
 
 pub const get_size =
     \\Read the message size in bytes (RFC822.SIZE) for the given UIDs.

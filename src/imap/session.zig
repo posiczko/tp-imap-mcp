@@ -200,7 +200,10 @@ fn splitFlags(arena: Allocator, s: []const u8) Allocator.Error![]const []const u
 }
 
 pub const Extracted = union(enum) {
-    text: []const u8, // not yet UTF-8 sanitized
+    text: struct {
+        bytes: []const u8, // not yet UTF-8 sanitized
+        parts: usize, // matching parts found (0 = none of that subtype)
+    },
     encrypted: []const u8, // protocol parameter
 };
 
@@ -208,13 +211,25 @@ pub const Extracted = union(enum) {
 pub fn extractText(arena: Allocator, message: []const u8, subtype: [:0]const u8) Error!Extracted {
     var out: ?[*]u8 = null;
     var out_len: usize = 0;
+    var parts: usize = 0;
     var proto: ?[*:0]u8 = null;
-    try check(c.tpi_extract_text(message.ptr, message.len, subtype, &out, &out_len, &proto));
+    try check(c.tpi_extract_text(message.ptr, message.len, subtype, &out, &out_len, &parts, &proto));
     defer c.tpi_buf_free(out);
     defer c.tpi_buf_free(if (proto) |p| p else null);
     if (proto) |p| return .{ .encrypted = try arena.dupe(u8, std.mem.sliceTo(p, 0)) };
-    const o = out orelse return .{ .text = "" };
-    return .{ .text = try arena.dupe(u8, o[0..out_len]) };
+    const o = out orelse return .{ .text = .{ .bytes = "", .parts = parts } };
+    return .{ .text = .{ .bytes = try arena.dupe(u8, o[0..out_len]), .parts = parts } };
+}
+
+/// RFC 2047-decodes a header value to UTF-8 for matching (ADR 0017). Falls
+/// back to the raw value if libetpan cannot parse it. Result is in `arena`.
+pub fn decodeHeaderValue(arena: Allocator, raw: []const u8) Allocator.Error![]const u8 {
+    var out: ?[*]u8 = null;
+    var out_len: usize = 0;
+    if (c.tpi_decode_header_value(raw.ptr, raw.len, &out, &out_len) != c.OK) return raw;
+    defer c.tpi_buf_free(out);
+    const o = out orelse return raw;
+    return arena.dupe(u8, o[0..out_len]);
 }
 
 const testing = std.testing;
@@ -234,4 +249,15 @@ test "checkHostName accepts the certificate's SAN and rejects other hosts" {
     try testing.expectError(error.HostnameMismatch, checkHostName(der, "evil.example.net"));
     try testing.expectError(error.HostnameMismatch, checkHostName(der, "example.org"));
     try testing.expectError(error.HostnameMismatch, checkHostName(der, "127.0.0.1"));
+}
+
+test "decodeHeaderValue decodes RFC 2047 B and Q words, leaves plain text alone" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try testing.expectEqualStrings("Password reset", try decodeHeaderValue(a, "=?UTF-8?B?UGFzc3dvcmQgcmVzZXQ=?="));
+    try testing.expectEqualStrings("Password reset", try decodeHeaderValue(a, "=?UTF-8?Q?Password_reset?="));
+    try testing.expectEqualStrings("R\u{e9}initialiser", try decodeHeaderValue(a, "=?ISO-8859-1?Q?R=E9initialiser?="));
+    try testing.expectEqualStrings("Reset your password", try decodeHeaderValue(a, "=?UTF-8?Q?Reset_?= =?UTF-8?Q?your_password?="));
+    try testing.expectEqualStrings("Plain subject", try decodeHeaderValue(a, "Plain subject"));
 }

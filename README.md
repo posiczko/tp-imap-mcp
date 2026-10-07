@@ -31,7 +31,8 @@ tp-imap-mcp exposes IMAP mailboxes to MCP clients (Claude Code, Claude Desktop, 
 | 👀 Read-only accounts | `IMAP_<NAME>_READONLY=1` refuses the two write tools; reads never mark mail as seen. |
 | ⚡ Local cache | Mailbox list and message headers/sizes cached in SQLite under `~/.cache/tp-imap-mcp/`. |
 | 🔎 Full IMAP search | The model's IMAP `SEARCH` criteria are passed through, with input validation against command injection. |
-| 🙈 Sensitive-content filters | *Planned* — see [Roadmap](#-roadmap). |
+| 🙈 Sensitive-content filters | Password-reset emails (and anything you define) are withheld: the model learns they exist, never their content. On by default. |
+| 🧼 Output sanitization | Plain text only; hidden HTML, comments, scripts and invisible Unicode removed; headers decoded; size caps — a defense against prompt injection. |
 
 ## 🚀 Quick Start
 
@@ -122,7 +123,7 @@ Then run the live read-only checks against each account (they print only PASS/FA
 
 ```bash
 op run --env-file imap.env -- zig build itest -- work
-# … 20 PASS lines …
+# … 26 PASS lines …
 # 0 failure(s)
 ```
 
@@ -243,6 +244,11 @@ All configuration is environment variables (usually via `op run --env-file imap.
 | `TP_IMAP_MCP_MAILBOX_TTL` | no | Seconds the cached mailbox list stays fresh (default `3600`) |
 | `TP_IMAP_MCP_CA_FILE` | no | PEM bundle for TLS verification (default `/opt/homebrew/etc/ca-certificates/cert.pem`) |
 | `XDG_CACHE_HOME` | no | Cache location base (default `~/.cache`) |
+| `TP_IMAP_MCP_FILTERS` | no | Active sensitive-content filters, comma-separated, or `none` (default `password_reset`) |
+| `IMAP_<NAME>_FILTERS` | no | Per-account override of `TP_IMAP_MCP_FILTERS` |
+| `XDG_CONFIG_HOME` | no | Config location base for `filters.zon` (default `~/.config`) |
+| `TP_IMAP_MCP_MAX_BODY_BYTES` | no | Max bytes per message body after sanitizing (default `32768`, min `1024`) |
+| `TP_IMAP_MCP_MAX_RESPONSE_BYTES` | no | Size budget per per-UID tool response (default `131072`, min `1024`) |
 
 `<NAME>` is the upper-cased account name. Invalid configuration stops startup with a message naming the variable — never its value.
 
@@ -259,6 +265,36 @@ IMAP_WORK_PASSWORD=op://Private/Work IMAP/password
 
 </details>
 
+<details>
+<summary>Custom filters: <code>~/.config/tp-imap-mcp/filters.zon</code></summary>
+
+```zig
+.{
+    .filters = .{
+        .{
+            .name = "banking",
+            .rules = .{
+                // a rule matches when ALL its conditions hold; a filter when ANY rule matches
+                .{ .{ .field = "from", .glob = .{ "*@chase.com", "*@schwab.com" } } },
+                .{
+                    .{ .field = "from", .glob = .{"*@paypal.com"} },
+                    .{ .field = "subject", .regex = .{"(receipt|statement)"} },
+                },
+            },
+        },
+        // same name as a built-in replaces it
+        .{ .name = "password_reset", .rules = .{ .{ .{ .field = "subject", .contains = .{ "password reset", "passwort" } } } } },
+    },
+}
+```
+
+- Each condition sets exactly one of `.contains` (case-insensitive substring), `.glob` (`*`/`?`, also matches the address inside `Name <addr>`), or `.regex` (POSIX extended, case-insensitive).
+- Headers are RFC 2047-decoded before matching; bodies are never inspected (or downloaded) to decide.
+- Defining a filter doesn't enable it — list it in `TP_IMAP_MCP_FILTERS` / `IMAP_<NAME>_FILTERS`.
+- Any error in the file (syntax, unknown key, bad regex) stops startup with the file, filter, rule and condition named. Restart after editing.
+
+</details>
+
 ## 🧰 Tools
 
 Every tool except `list_accounts` takes an `account` argument.
@@ -271,13 +307,23 @@ Every tool except `list_accounts` takes an `account` argument.
 | `mailboxes_status` | `MESSAGES`, `RECENT`, `UNSEEN` counts |
 | `search` | UIDs matching IMAP SEARCH criteria (default `ALL` in `INBOX`) |
 | `get_header` / `get_header_field` | Raw headers, or one field, per UID |
-| `get_text` / `get_html` | Plain-text / HTML body per UID (UTF-8, LF line endings) |
+| `get_text` / `get_html` | Message body per UID as sanitized plain text (`get_text` prefers the plain-text part) |
 | `get_size` | Message size in bytes |
 | `get_keywords` / `change_keywords` | Read / add / remove IMAP flags and keywords |
 | `create_message` | Append a raw RFC 822 message to the Drafts folder |
 | `clear_cache` | Delete the account's local cache |
 
 Per-UID results are aligned with the requested UIDs (`null` for UIDs that don't exist). Reading never sets `\Seen`. PGP/MIME messages are not decrypted; a marker is returned instead.
+
+What the model sees, after filtering and sanitizing:
+
+| Situation | Output |
+|---|---|
+| Message matched by a filter | `get_text`/`get_html`: `[withheld by filter "password_reset"]`; `get_header`: only `date`, `from`, `x-tp-imap-mcp-withheld` |
+| HTML email | Plain text; links as `text (https://…)`; hidden elements, comments, scripts, images dropped |
+| Long body | Cut at 32 KiB with `[truncated: N bytes omitted]` |
+| Too many UIDs at once | Later items become `[omitted: response size limit reached; request fewer UIDs]` |
+| Encoded headers (`=?UTF-8?B?…?=`) | Decoded, invisible characters removed, 2 KiB max per value |
 
 ## 🔒 Security model
 
@@ -286,6 +332,8 @@ Per-UID results are aligned with the requested UIDs (`null` for UIDs that don't 
 - **Command injection:** search criteria cannot contain CR/LF/NUL; UIDs, keywords, and header names are validated.
 - **Read-only accounts:** write tools refuse before contacting the server.
 - **Cache:** `~/.cache/tp-imap-mcp/<account>.sqlite3`, mode `0600`. It contains message headers (subjects, addresses); delete it any time or set `TP_IMAP_MCP_CACHE=0`.
+- **Sensitive mail:** filtered messages' bodies are never downloaded; their subjects are never shown.
+- **Prompt injection:** output is plain text with hidden HTML content and invisible Unicode removed. Text hidden only by CSS colour (white on white) or off-screen positioning is *not* detected.
 
 ## 🩺 Troubleshooting
 
@@ -303,6 +351,10 @@ Per-UID results are aligned with the requested UIDs (`null` for UIDs that don't 
 | `cannot connect to host:port` | Host/port wrong, or port 993 blocked. Only implicit TLS (993-style) is supported, not STARTTLS. |
 | A negated search (`NOT FROM "x"`) returns nothing | Some servers (seen on Dovecot) mishandle `NOT` on header keys; search the positive form instead. |
 | A folder created elsewhere doesn't show up | The mailbox list is cached for an hour; ask for a refresh. |
+| `TP_IMAP_MCP_FILTERS: unknown filter "x"` | The name isn't built in or defined in `filters.zon`; fix the name or use `none`. |
+| `…/filters.zon: filter "x" rule N condition M: …` | Fix the named rule (exactly one of `.contains`/`.glob`/`.regex`, non-empty patterns, valid regex) and restart. |
+| An email shows `[withheld by filter "…"]` | Working as intended. Disable for an account with `IMAP_<NAME>_FILTERS=none`, or narrow the rules in `filters.zon`. |
+| `… must be a number of bytes >= 1024` | Fix `TP_IMAP_MCP_MAX_BODY_BYTES` / `TP_IMAP_MCP_MAX_RESPONSE_BYTES`. |
 
 ## 🛠 Tech Stack
 
@@ -333,7 +385,7 @@ src/
 ├── itest.zig           live integration checks
 └── testdata/           MIME fixtures
 docs/
-├── adr/                architecture decision records (0001–0017)
+├── adr/                architecture decision records (0001–0019)
 └── superpowers/        design specs and implementation plans
 ```
 
@@ -358,11 +410,9 @@ The live checks print only PASS/FAIL lines and use a throwaway cache in `.zig-ca
 - [x] Verified TLS (chain, SNI, host name)
 - [x] Read-only accounts
 - [x] SQLite cache for mailbox list and headers/sizes (XDG)
-- [ ] **Sensitive-content filters** (designed, not yet implemented)
-  - Header-based filters keep sensitive messages' bodies from ever being downloaded; the model sees `[withheld by filter "password_reset"]` instead, plus only `From` and `Date`.
-  - Built-in `password_reset` filter, **on by default**; enable/disable with `TP_IMAP_MCP_FILTERS` (or `none`) and per account with `IMAP_<NAME>_FILTERS`.
-  - Your own filters in `~/.config/tp-imap-mcp/filters.zon`, composable from `contains`, `glob`, and `regex` conditions.
-  - Design: [spec](docs/superpowers/specs/2026-10-07-sensitive-content-filters-design.md) · [ADR 0017](docs/adr/0017-sensitive-content-filters.md)
+- [x] Sensitive-content filters — [spec](docs/superpowers/specs/2026-10-07-sensitive-content-filters-design.md) · [ADR 0017](docs/adr/0017-sensitive-content-filters.md)
+- [x] Output sanitization — [spec](docs/superpowers/specs/2026-10-07-output-sanitization-design.md) · [ADR 0018](docs/adr/0018-sanitize-model-bound-output.md) · [ADR 0019](docs/adr/0019-decoded-sanitized-header-values.md)
+- [ ] Built-in `one_time_codes` filter (2FA / magic-link emails)
 - [ ] Deferred minor issues — see [docs/TODO.md](docs/TODO.md)
 
 ## 🤝 Contributing

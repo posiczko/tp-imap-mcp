@@ -12,6 +12,8 @@ const config = @import("config.zig");
 const tools = @import("tools.zig");
 const c = @import("imap/c.zig");
 const Registry = @import("accounts.zig").Registry;
+const filter = @import("filter/rules.zig");
+const unicode = @import("sanitize/unicode.zig");
 
 var failures: usize = 0;
 
@@ -138,6 +140,9 @@ pub fn main(init: std.process.Init) !u8 {
         _ = c.tpi_logout(reg.slots[idx].session.?.handle);
         const again = try h.call("get_size", "{{\"account\":{s},\"directory\":\"INBOX\",\"uids\":[\"{s}\"]}}", .{ acct, last });
         report(again != null, "reconnects after server-side logout", .{});
+
+        try sanitizeChecks(h, acct, uids);
+        try filterChecks(h, &reg, idx, acct, set);
     }
 
     if (write_box) |box| try writeChecks(h, acct, box);
@@ -179,4 +184,81 @@ fn hasKeyword(v: std.json.Value, uid: []const u8) bool {
 fn uidvalidityOf(reg: *Registry, idx: usize) u32 {
     const s = &(reg.slots[idx].session orelse return 0);
     return s.examine("INBOX") catch 0;
+}
+
+/// ADR 0017: with a filter matching every message, bodies and non-visible
+/// headers must be withheld; with no filters, content comes back.
+fn filterChecks(h: Harness, reg: *Registry, idx: usize, acct: []const u8, set: []const u8) !void {
+    const everything: filter.Filter = .{ .name = "everything", .rules = &.{.{ .conditions = &.{.{ .field = "date", .matcher = .{ .glob = &.{"*"} } }} }} };
+    const one = [_]*const filter.Filter{&everything};
+    const per_account = try h.arena.alloc([]const *const filter.Filter, reg.accounts.len);
+    @memset(per_account, &.{});
+    per_account[idx] = &one;
+    reg.active_filters = per_account;
+    defer reg.active_filters = &.{};
+
+    const marker = "[withheld by filter \"everything\"]";
+    for ([_][]const u8{ "get_text", "get_html" }) |tool| {
+        const r = try h.call(tool, "{{\"account\":{s},\"directory\":\"INBOX\",\"uids\":{s}}}", .{ acct, set });
+        const items = if (r) |v| v.array.items else &.{};
+        const ok = items.len == 3 and items[0] == .string and std.mem.eql(u8, items[0].string, marker) and
+            items[1] == .null and items[2] == .string and std.mem.eql(u8, items[2].string, marker);
+        report(ok, "filter: {s} withholds matched messages", .{tool});
+    }
+    const hdr = try h.call("get_header", "{{\"account\":{s},\"directory\":\"INBOX\",\"uids\":{s}}}", .{ acct, set });
+    const ok_hdr = blk: {
+        const obj = (hdr orelse break :blk false).array.items[0].object;
+        if (obj.get("x-tp-imap-mcp-withheld") == null) break :blk false;
+        for (obj.keys()) |k| if (!std.mem.eql(u8, k, "date") and !std.mem.eql(u8, k, "from") and !std.mem.eql(u8, k, "x-tp-imap-mcp-withheld")) break :blk false;
+        break :blk true;
+    };
+    report(ok_hdr, "filter: get_header shows only date/from plus marker", .{});
+
+    reg.active_filters = &.{};
+    const plain = try h.call("get_text", "{{\"account\":{s},\"directory\":\"INBOX\",\"uids\":{s}}}", .{ acct, set });
+    const ok_plain = plain != null and plain.?.array.items[0] == .string and !std.mem.startsWith(u8, plain.?.array.items[0].string, "[withheld");
+    report(ok_plain, "filter: no active filters returns content", .{});
+}
+
+/// ADR 0018: bodies of the newest messages are plain text with no markup and
+/// no invisible characters.
+fn sanitizeChecks(h: Harness, acct: []const u8, uids: []const std.json.Value) !void {
+    const n = @min(uids.len, 10);
+    var list: std.ArrayList(u8) = .empty;
+    try list.append(h.arena, '[');
+    for (uids[uids.len - n ..], 0..) |u, i| {
+        if (i > 0) try list.append(h.arena, ',');
+        try list.print(h.arena, "\"{s}\"", .{u.string});
+    }
+    try list.append(h.arena, ']');
+    for ([_][]const u8{ "get_text", "get_html" }) |tool| {
+        const r = try h.call(tool, "{{\"account\":{s},\"directory\":\"INBOX\",\"uids\":{s}}}", .{ acct, list.items });
+        var ok = r != null;
+        var checked: usize = 0;
+        if (r) |v| for (v.array.items) |item| {
+            if (item != .string) continue;
+            const body = item.string;
+            checked += 1;
+            if (containsHtmlTag(body)) ok = false;
+            if ((try unicode.clean(h.arena, body)).ptr != body.ptr) ok = false;
+        };
+        report(ok, "sanitize: {s} on {d} messages has no markup or invisible characters", .{ tool, checked });
+    }
+}
+
+/// `<tag` followed by whitespace, `>` or `/`, for common HTML element names.
+/// (A bare `<letter` is legitimate in plain text, e.g. `John <john@x.org>`.)
+fn containsHtmlTag(body: []const u8) bool {
+    const tags = [_][]const u8{ "html", "body", "head", "div", "span", "p", "a", "br", "table", "tr", "td", "img", "script", "style", "font", "center", "ul", "li" };
+    var i: usize = 0;
+    while (std.mem.findScalarPos(u8, body, i, '<')) |at| : (i = at + 1) {
+        const rest = body[at + 1 ..];
+        for (tags) |t| {
+            if (rest.len > t.len and std.ascii.startsWithIgnoreCase(rest, t)) {
+                const next = rest[t.len];
+                if (next == '>' or next == '/' or std.ascii.isWhitespace(next)) return true;
+            }
+        }
+    }
+    return false;
 }

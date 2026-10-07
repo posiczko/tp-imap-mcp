@@ -10,6 +10,7 @@ typedef struct {
   char *buf;
   size_t len;
   size_t cap;
+  size_t parts; /* matching, non-attachment parts seen (even if empty) */
 } growbuf;
 
 static int grow_append(growbuf *g, const char *data, size_t n) {
@@ -74,6 +75,7 @@ static int append_part(growbuf *g, struct mailmime *part) {
   struct mailmime_data *d = part->mm_data.mm_single;
   if (d == NULL || d->dt_type != MAILMIME_DATA_TEXT)
     return 0;
+  g->parts++;
 
   int encoding = sf.fld_encoding != NULL ? sf.fld_encoding->enc_type : MAILMIME_MECHANISM_8BIT;
   size_t idx = 0;
@@ -128,9 +130,11 @@ static int walk(growbuf *g, struct mailmime *mime, const char *want_subtype) {
 }
 
 int tpi_extract_text(const char *msg, size_t len, const char *subtype,
-                     char **out, size_t *out_len, char **encrypted_protocol) {
+                     char **out, size_t *out_len, size_t *parts_found,
+                     char **encrypted_protocol) {
   *out = NULL;
   *out_len = 0;
+  *parts_found = 0;
   *encrypted_protocol = NULL;
 
   size_t idx = 0;
@@ -166,7 +170,21 @@ int tpi_extract_text(const char *msg, size_t len, const char *subtype,
   }
   *out = g.buf;
   *out_len = g.len;
+  *parts_found = g.parts;
   return TPI_OK;
 }
 
 void tpi_buf_free(char *buf) { free(buf); }
+
+int tpi_decode_header_value(const char *raw, size_t len, char **out, size_t *out_len) {
+  *out = NULL;
+  *out_len = 0;
+  size_t idx = 0;
+  char *decoded = NULL;
+  if (mailmime_encoded_phrase_parse("utf-8", raw, len, &idx, "utf-8", &decoded) != MAILIMF_NO_ERROR ||
+      decoded == NULL)
+    return TPI_ERR_PARSE;
+  *out = decoded;
+  *out_len = strlen(decoded);
+  return TPI_OK;
+}

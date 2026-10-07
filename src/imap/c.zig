@@ -62,5 +62,12 @@ pub extern fn tpi_uid_store_flags(s: *Session, uids: [*]const u32, uid_count: us
 
 pub extern fn tpi_append(s: *Session, mailbox: [*:0]const u8, data: [*]const u8, len: usize) c_int;
 
-pub extern fn tpi_extract_text(msg: [*]const u8, len: usize, subtype: [*:0]const u8, out: *?[*]u8, out_len: *usize, encrypted_protocol: *?[*:0]u8) c_int;
+pub extern fn tpi_extract_text(msg: [*]const u8, len: usize, subtype: [*:0]const u8, out: *?[*]u8, out_len: *usize, parts_found: *usize, encrypted_protocol: *?[*:0]u8) c_int;
 pub extern fn tpi_buf_free(buf: ?[*]u8) void;
+
+pub extern fn tpi_decode_header_value(raw: [*]const u8, len: usize, out: *?[*]u8, out_len: *usize) c_int;
+
+pub const Regex = opaque {};
+pub extern fn tpi_regex_compile(pattern: [*:0]const u8, err: [*]u8, errlen: usize) ?*Regex;
+pub extern fn tpi_regex_match(r: *const Regex, text: [*:0]const u8) c_int;
+pub extern fn tpi_regex_free(r: ?*Regex) void;

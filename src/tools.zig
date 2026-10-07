@@ -9,6 +9,9 @@ const body = @import("body.zig");
 const desc = @import("descriptions.zig");
 const headers = @import("headers.zig");
 const listmatch = @import("listmatch.zig");
+const filter = @import("filter/rules.zig");
+const unicode = @import("sanitize/unicode.zig");
+const limit = @import("sanitize/limit.zig");
 const mutf7 = @import("imap/mutf7.zig");
 const imap = @import("imap/session.zig");
 const text = @import("text.zig");
@@ -271,9 +274,14 @@ pub fn call(registry: *Registry, arena: Allocator, name: []const u8, args: ?std.
 // ---- handlers -------------------------------------------------------------
 
 fn listAccounts(ctx: *Ctx) Failure![]const u8 {
-    const Entry = struct { name: []const u8, login: []const u8, readonly: bool };
+    const Entry = struct { name: []const u8, login: []const u8, readonly: bool, filters: []const []const u8 };
     const out = try ctx.arena.alloc(Entry, ctx.registry.accounts.len);
-    for (ctx.registry.accounts, out) |a, *e| e.* = .{ .name = a.name, .login = a.login, .readonly = a.readonly };
+    for (ctx.registry.accounts, out, 0..) |a, *e, i| {
+        const active = ctx.registry.filtersFor(i);
+        const names = try ctx.arena.alloc([]const u8, active.len);
+        for (active, names) |f, *n| n.* = f.name;
+        e.* = .{ .name = a.name, .login = a.login, .readonly = a.readonly, .filters = names };
+    }
     return ctx.json(out);
 }
 
@@ -294,10 +302,11 @@ fn listMailboxes(ctx: *Ctx) Failure![]const u8 {
     const Entry = struct { PATH: []const u8, DELIMITER: ?[]const u8, FLAGS: []const []const u8 };
     var out: std.ArrayList(Entry) = .empty;
     for (all) |m| {
-        const path = mutf7.decode(ctx.arena, m.name) catch |err| switch (err) {
+        const decoded = mutf7.decode(ctx.arena, m.name) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidMutf7 => try text.sanitizeUtf8(ctx.arena, m.name),
         };
+        const path = try unicode.clean(ctx.arena, decoded);
         if (!try listmatch.matches(ctx.arena, path, directory, pattern, m.delimiter)) continue;
         try out.append(ctx.arena, .{
             .PATH = path,
@@ -343,40 +352,115 @@ fn fetchAligned(ctx: *Ctx, what: imap.What) Failure!struct { uids: []u32, items:
 }
 
 /// Header + size for each UID, from the cache where possible (ADR 0013).
-fn fetchHeaders(ctx: *Ctx) Failure![]?*const Fetched {
+fn fetchHeaders(ctx: *Ctx) Failure!struct { idx: usize, items: []?*const Fetched } {
     const idx = try ctx.account();
     const mailbox = try ctx.mailbox("directory", null);
     const uids = try ctx.uids();
     var op: CachedHeadersOp = .{ .arena = ctx.arena, .registry = ctx.registry, .idx = idx, .mailbox = mailbox, .uids = uids };
     try ctx.imapRun(idx, &op);
-    return alignToUids(ctx.arena, uids, op.result);
+    return .{ .idx = idx, .items = try alignToUids(ctx.arena, uids, op.result) };
+}
+
+/// Name of the active filter withholding this message, if any (ADR 0017).
+fn withheldBy(arena: Allocator, active: []const *const filter.Filter, raw_header: []const u8) Allocator.Error!?[]const u8 {
+    if (active.len == 0) return null;
+    return filter.classify(arena, active, try filter.decodeHeaders(arena, raw_header));
+}
+
+/// A header value as shown to the model: RFC 2047-decoded, valid UTF-8,
+/// invisible characters removed, capped (ADR 0019).
+fn displayValue(arena: Allocator, raw: []const u8) Allocator.Error![]const u8 {
+    const utf8 = try text.sanitizeUtf8(arena, try imap.decodeHeaderValue(arena, raw));
+    return limit.truncate(arena, try unicode.clean(arena, utf8), limit.header_value_max);
+}
+
+const HeaderGroups = struct {
+    groups: std.array_hash_map.String(std.ArrayList([]const u8)) = .empty,
+    size: usize = 0, // bytes of names and values, for the response budget
+    omitted: usize = 0, // header lines dropped by the per-item cap
+};
+
+/// Display values grouped by name in first-appearance order; for a withheld
+/// message only the visible headers.
+/// At most `max_bytes` of names and values per message; the rest are counted
+/// in `omitted` (one message cannot flood a response).
+fn headerGroups(arena: Allocator, hs: []const headers.Header, withheld: ?[]const u8, max_bytes: usize) Allocator.Error!HeaderGroups {
+    var out: HeaderGroups = .{};
+    for (hs) |h| {
+        if (withheld != null and !filter.isVisibleHeader(h.name)) continue;
+        if (out.size >= max_bytes) {
+            out.omitted += 1;
+            continue;
+        }
+        const g = try out.groups.getOrPut(arena, h.name);
+        if (!g.found_existing) {
+            g.value_ptr.* = .empty;
+            out.size += h.name.len;
+        }
+        const v = try displayValue(arena, h.value);
+        try g.value_ptr.append(arena, v);
+        out.size += v.len;
+    }
+    return out;
+}
+
+/// One get_header object, plus the withheld marker header when withheld.
+fn writeHeaderObject(jw: *Stringify, hg: HeaderGroups, withheld: ?[]const u8) Failure!void {
+    var groups = hg.groups;
+    jw.beginObject() catch return error.OutOfMemory;
+    var it = groups.iterator();
+    while (it.next()) |e| {
+        jw.objectField(e.key_ptr.*) catch return error.OutOfMemory;
+        jw.write(e.value_ptr.items) catch return error.OutOfMemory;
+    }
+    if (withheld) |name| {
+        jw.objectField("x-tp-imap-mcp-withheld") catch return error.OutOfMemory;
+        jw.write(&[_][]const u8{name}) catch return error.OutOfMemory;
+    }
+    if (hg.omitted > 0) {
+        jw.objectField("x-tp-imap-mcp-truncated") catch return error.OutOfMemory;
+        var buf: [64]u8 = undefined;
+        const note = std.mem.print(&buf, "{d} header lines omitted", .{hg.omitted}) catch unreachable;
+        jw.write(&[_][]const u8{note}) catch return error.OutOfMemory;
+    }
+    jw.endObject() catch return error.OutOfMemory;
+}
+
+/// get_header_field values for one message (withheld fields get the marker).
+fn headerFieldValues(arena: Allocator, hs: []const headers.Header, field: []const u8, withheld: ?[]const u8) Allocator.Error![]const []const u8 {
+    if (withheld) |name| if (!filter.isVisibleHeader(field)) {
+        const m = try arena.alloc([]const u8, 1);
+        m[0] = try filter.marker(arena, name);
+        return m;
+    };
+    var values: std.ArrayList([]const u8) = .empty;
+    for (hs) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, field))
+            try values.append(arena, try displayValue(arena, h.value));
+    }
+    return values.items;
 }
 
 fn getHeader(ctx: *Ctx) Failure![]const u8 {
-    const items = try fetchHeaders(ctx);
+    const r = try fetchHeaders(ctx);
+    const active = ctx.registry.filtersFor(r.idx);
+    var budget: limit.Budget = .init(ctx.registry.settings.max_response_bytes);
     var aw: std.Io.Writer.Allocating = .init(ctx.arena);
     var jw: Stringify = .{ .writer = &aw.writer };
     jw.beginArray() catch return error.OutOfMemory;
-    for (items) |maybe| {
+    for (r.items) |maybe| {
         const item = maybe orelse {
             jw.write(null) catch return error.OutOfMemory;
             continue;
         };
-        const hs = try headers.parse(ctx.arena, item.data orelse "");
-        // Group values by name, preserving first-appearance order.
-        var groups: std.array_hash_map.String(std.ArrayList([]const u8)) = .empty;
-        for (hs) |h| {
-            const g = try groups.getOrPut(ctx.arena, h.name);
-            if (!g.found_existing) g.value_ptr.* = .empty;
-            try g.value_ptr.append(ctx.arena, try text.sanitizeUtf8(ctx.arena, h.value));
+        const raw = item.data orelse "";
+        const withheld = try withheldBy(ctx.arena, active, raw);
+        const hg = try headerGroups(ctx.arena, try headers.parse(ctx.arena, raw), withheld, ctx.registry.settings.max_body_bytes);
+        if (budget.admit(hg.size)) {
+            try writeHeaderObject(&jw, hg, withheld);
+        } else {
+            jw.write(.{ .@"x-tp-imap-mcp-omitted" = .{limit.omitted_reason} }) catch return error.OutOfMemory;
         }
-        jw.beginObject() catch return error.OutOfMemory;
-        var it = groups.iterator();
-        while (it.next()) |e| {
-            jw.objectField(e.key_ptr.*) catch return error.OutOfMemory;
-            jw.write(e.value_ptr.items) catch return error.OutOfMemory;
-        }
-        jw.endObject() catch return error.OutOfMemory;
     }
     jw.endArray() catch return error.OutOfMemory;
     return aw.written();
@@ -385,35 +469,75 @@ fn getHeader(ctx: *Ctx) Failure![]const u8 {
 fn getHeaderField(ctx: *Ctx) Failure![]const u8 {
     const field = try ctx.string("field");
     try ctx.check(validate.field(field));
-    const items = try fetchHeaders(ctx);
-    const out = try ctx.arena.alloc(?[]const []const u8, items.len);
-    for (items, out) |maybe, *o| {
+    const r = try fetchHeaders(ctx);
+    const active = ctx.registry.filtersFor(r.idx);
+    var budget: limit.Budget = .init(ctx.registry.settings.max_response_bytes);
+    const out = try ctx.arena.alloc(?[]const []const u8, r.items.len);
+    for (r.items, out) |maybe, *o| {
         const item = maybe orelse {
             o.* = null;
             continue;
         };
-        var values: std.ArrayList([]const u8) = .empty;
-        for (try headers.parse(ctx.arena, item.data orelse "")) |h| {
-            if (std.ascii.eqlIgnoreCase(h.name, field))
-                try values.append(ctx.arena, try text.sanitizeUtf8(ctx.arena, h.value));
-        }
-        o.* = values.items;
+        const raw = item.data orelse "";
+        const values = try headerFieldValues(ctx.arena, try headers.parse(ctx.arena, raw), field, try withheldBy(ctx.arena, active, raw));
+        var size: usize = 0;
+        for (values) |v| size += v.len;
+        o.* = if (budget.admit(size)) values else &.{limit.omitted_text};
     }
     return ctx.json(out);
 }
 
 fn bodies(ctx: *Ctx, kind: body.Kind) Failure![]const u8 {
+    const idx = try ctx.account();
+    if (ctx.registry.filtersFor(idx).len > 0) return filteredBodies(ctx, idx, kind);
     const r = try fetchAligned(ctx, .{ .body = true });
+    var budget: limit.Budget = .init(ctx.registry.settings.max_response_bytes);
     const out = try ctx.arena.alloc(?[]const u8, r.items.len);
     for (r.items, out) |maybe, *o| {
         const item = maybe orelse {
             o.* = null;
             continue;
         };
-        o.* = body.render(ctx.arena, item.data orelse "", kind) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return ctx.failed("UID {d}: message could not be parsed as MIME", .{item.uid}),
+        o.* = try renderBudgeted(ctx, item, kind, &budget);
+    }
+    return ctx.json(out);
+}
+
+/// Sanitized body text, or the omission marker once the response budget is
+/// spent (sanitization spec §5.2).
+fn renderBudgeted(ctx: *Ctx, item: *const Fetched, kind: body.Kind, budget: *limit.Budget) Failure![]const u8 {
+    if (budget.exhausted) return limit.omitted_text;
+    const rendered = body.render(ctx.arena, item.data orelse "", kind, ctx.registry.settings.max_body_bytes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return ctx.failed("UID {d}: message could not be parsed as MIME", .{item.uid}),
+    };
+    return if (budget.admit(rendered.len)) rendered else limit.omitted_text;
+}
+
+/// get_text/get_html with active filters: headers first, classify, then fetch
+/// bodies only for messages no filter withholds (ADR 0017).
+fn filteredBodies(ctx: *Ctx, idx: usize, kind: body.Kind) Failure![]const u8 {
+    const mailbox = try ctx.mailbox("directory", null);
+    const uids = try ctx.uids();
+    var op: FilteredBodiesOp = .{
+        .arena = ctx.arena,
+        .headers = .{ .arena = ctx.arena, .registry = ctx.registry, .idx = idx, .mailbox = mailbox, .uids = uids },
+        .active = ctx.registry.filtersFor(idx),
+    };
+    try ctx.imapRun(idx, &op);
+    const items = try alignToUids(ctx.arena, uids, op.bodies);
+    var budget: limit.Budget = .init(ctx.registry.settings.max_response_bytes);
+    const out = try ctx.arena.alloc(?[]const u8, uids.len);
+    for (uids, items, out) |u, maybe, *o| {
+        if (op.withheld.get(u)) |name| {
+            o.* = try filter.marker(ctx.arena, name);
+            continue;
+        }
+        const item = maybe orelse {
+            o.* = null;
+            continue;
         };
+        o.* = try renderBudgeted(ctx, item, kind, &budget);
     }
     return ctx.json(out);
 }
@@ -427,7 +551,7 @@ fn getHtml(ctx: *Ctx) Failure![]const u8 {
 }
 
 fn getSize(ctx: *Ctx) Failure![]const u8 {
-    const items = try fetchHeaders(ctx);
+    const items = (try fetchHeaders(ctx)).items;
     const out = try ctx.arena.alloc(?u32, items.len);
     for (items, out) |maybe, *o| o.* = if (maybe) |item| item.size else null;
     return ctx.json(out);
@@ -533,7 +657,11 @@ const CachedHeadersOp = struct {
     result: []Fetched = &.{},
 
     pub fn run(self: *CachedHeadersOp, s: *Session) accounts.Error!void {
-        const uidvalidity = try s.examine(self.mailbox);
+        try self.afterExamine(s, try s.examine(self.mailbox));
+    }
+
+    /// The mailbox is already open; serve from cache, fetch the rest.
+    fn afterExamine(self: *CachedHeadersOp, s: *Session, uidvalidity: u32) accounts.Error!void {
         // Without a UIDVALIDITY, cached UIDs cannot be trusted: go live.
         const store = if (uidvalidity != 0) self.registry.cache(self.idx) else null;
 
@@ -562,6 +690,50 @@ const CachedHeadersOp = struct {
         self.result = try std.mem.concat(self.arena, Fetched, &.{ cached, fetched });
     }
 };
+
+const FilteredBodiesOp = struct {
+    arena: Allocator,
+    headers: CachedHeadersOp,
+    active: []const *const filter.Filter,
+    bodies: []Fetched = &.{},
+    withheld: std.AutoHashMapUnmanaged(u32, []const u8) = .empty,
+
+    pub fn run(self: *FilteredBodiesOp, s: *Session) accounts.Error!void {
+        // A retry after reconnect starts from scratch.
+        self.withheld.clearRetainingCapacity();
+        self.bodies = &.{};
+        try self.headers.afterExamine(s, try s.examine(self.headers.mailbox));
+        const allowed = try classifyForBodies(self.arena, self.active, self.headers.uids, self.headers.result, &self.withheld);
+        if (allowed.len > 0)
+            self.bodies = try s.uidFetch(self.arena, allowed, .{ .body = true });
+    }
+};
+
+/// Fail closed: a UID is allowed only if its merged header data was seen and
+/// no active filter matches it. Withheld UIDs are recorded in `withheld`.
+fn classifyForBodies(
+    arena: Allocator,
+    active: []const *const filter.Filter,
+    uids: []const u32,
+    header_results: []const Fetched,
+    withheld: *std.AutoHashMapUnmanaged(u32, []const u8),
+) Allocator.Error![]const u32 {
+    const merged = try alignToUids(arena, uids, header_results);
+    var allowed: std.ArrayList(u32) = .empty;
+    for (uids, merged) |u, maybe| {
+        const item = maybe orelse continue; // no such message
+        const data = item.data orelse continue; // headers never arrived: do not fetch
+        if (withheld.contains(u)) continue;
+        if (try withheldBy(arena, active, data)) |name| {
+            try withheld.put(arena, u, name);
+        } else {
+            for (allowed.items) |x| {
+                if (x == u) break;
+            } else try allowed.append(arena, u);
+        }
+    }
+    return allowed.items;
+}
 
 const StoreOp = struct {
     arena: Allocator,
@@ -653,7 +825,7 @@ test "offline tools: list_accounts, whoami" {
     const a = arena_state.allocator();
 
     try testing.expectEqualStrings(
-        "[{\"name\":\"rw\",\"login\":\"rw@example.org\",\"readonly\":false},{\"name\":\"ro\",\"login\":\"ro@example.org\",\"readonly\":true}]",
+        "[{\"name\":\"rw\",\"login\":\"rw@example.org\",\"readonly\":false,\"filters\":[]},{\"name\":\"ro\",\"login\":\"ro@example.org\",\"readonly\":true,\"filters\":[]}]",
         (try callJson(&reg, a, "list_accounts", "{}")).?.content,
     );
     try testing.expectEqualStrings("ro@example.org", (try callJson(&reg, a, "whoami", "{\"account\":\"RO\"}")).?.content);
@@ -732,4 +904,94 @@ test "alignToUids merges duplicate FETCH responses instead of letting the last w
     try testing.expectEqualStrings("Subject: x\r\n\r\n", out[0].?.data.?);
     try testing.expectEqual(50, out[0].?.size);
     try testing.expectEqualStrings("\\Seen", out[0].?.flags.?[0]);
+}
+
+test "list_accounts reports each account's active filters" {
+    var accts = testAccounts();
+    var reg = try testRegistry(&accts);
+    defer reg.deinit();
+    const active = [_][]const *const filter.Filter{ &.{&filter.password_reset}, &.{} };
+    reg.active_filters = &active;
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const got = (try callJson(&reg, arena_state.allocator(), "list_accounts", "{}")).?.content;
+    try testing.expect(std.mem.find(u8, got, "\"name\":\"rw\",\"login\":\"rw@example.org\",\"readonly\":false,\"filters\":[\"password_reset\"]") != null);
+    try testing.expect(std.mem.find(u8, got, "\"readonly\":true,\"filters\":[]") != null);
+}
+
+test "withheld message: get_header keeps only date/from plus marker; get_header_field withholds the rest" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const raw = "Date: Tue, 7 Oct 2026 10:00:00 +0000\r\nFrom: GitHub <noreply@github.com>\r\nSubject: =?UTF-8?Q?Reset_your_password?=\r\nX-Code: 482913\r\n\r\n";
+    const active = [_]*const filter.Filter{&filter.password_reset};
+    const withheld = try withheldBy(a, &active, raw);
+    try testing.expectEqualStrings("password_reset", withheld.?);
+    try testing.expect((try withheldBy(a, &.{}, raw)) == null);
+
+    const hs = try headers.parse(a, raw);
+    var aw: std.Io.Writer.Allocating = .init(a);
+    var jw: Stringify = .{ .writer = &aw.writer };
+    try writeHeaderObject(&jw, try headerGroups(a, hs, withheld, 32 * 1024), withheld);
+    try testing.expectEqualStrings(
+        "{\"date\":[\"Tue, 7 Oct 2026 10:00:00 +0000\"],\"from\":[\"GitHub <noreply@github.com>\"],\"x-tp-imap-mcp-withheld\":[\"password_reset\"]}",
+        aw.written(),
+    );
+
+    try testing.expectEqualStrings("[withheld by filter \"password_reset\"]", (try headerFieldValues(a, hs, "Subject", withheld))[0]);
+    try testing.expectEqualStrings("[withheld by filter \"password_reset\"]", (try headerFieldValues(a, hs, "x-code", withheld))[0]);
+    try testing.expectEqualStrings("GitHub <noreply@github.com>", (try headerFieldValues(a, hs, "FROM", withheld))[0]);
+    // Not withheld: the subject comes back decoded (ADR 0019).
+    try testing.expectEqualStrings("Reset your password", (try headerFieldValues(a, hs, "subject", null))[0]);
+}
+
+test "header values are decoded, cleaned of invisible characters, and capped" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // "Invoice\u{200B} due" base64-encoded, with a zero-width space hidden inside.
+    try testing.expectEqualStrings("Invoice due", try displayValue(a, "=?UTF-8?B?SW52b2ljZeKAiyBkdWU=?="));
+    try testing.expectEqualStrings("plain\u{e9}", try displayValue(a, "plain\u{e9}\u{202E}"));
+
+    var long: std.ArrayList(u8) = .empty;
+    try long.appendNTimes(a, 'a', 5000);
+    const capped = try displayValue(a, long.items);
+    try testing.expect(std.mem.endsWith(u8, capped, "[truncated: 2952 bytes omitted]"));
+
+    const hg = try headerGroups(a, try headers.parse(a, "Subject: =?UTF-8?Q?Hi?=\r\nTo: x@y.z\r\n\r\n"), null, 32 * 1024);
+    try testing.expectEqual("subject".len + "Hi".len + "to".len + "x@y.z".len, hg.size);
+}
+
+test "review: one get_header item is capped" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var raw: std.ArrayList(u8) = .empty;
+    for (0..2000) |i| {
+        try raw.print(a, "X-H{d}: ", .{i});
+        try raw.appendNTimes(a, 'v', 100);
+        try raw.appendSlice(a, "\r\n");
+    }
+    try raw.appendSlice(a, "\r\n");
+    const hg = try headerGroups(a, try headers.parse(a, raw.items), null, 32 * 1024);
+    try testing.expect(hg.size <= 32 * 1024 + 4096);
+    try testing.expect(hg.omitted > 0);
+}
+
+test "review: bodies are fetched only for UIDs whose headers were seen and passed" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const active = [_]*const filter.Filter{&filter.password_reset};
+    // UID 42: an unsolicited flags-only FETCH arrives before its real headers.
+    const fetched = [_]Fetched{
+        .{ .uid = 42, .size = 0, .data = null, .flags = &.{"\\Seen"} },
+        .{ .uid = 42, .size = 10, .data = "Subject: Reset your password\r\n\r\n", .flags = null },
+        .{ .uid = 7, .size = 10, .data = "Subject: Lunch\r\n\r\n", .flags = null },
+        .{ .uid = 9, .size = 0, .data = null, .flags = &.{"\\Seen"} }, // never got headers
+    };
+    var withheld: std.AutoHashMapUnmanaged(u32, []const u8) = .empty;
+    const allowed = try classifyForBodies(a, &active, &.{ 42, 7, 9 }, &fetched, &withheld);
+    try testing.expectEqualSlices(u32, &.{7}, allowed);
+    try testing.expectEqualStrings("password_reset", withheld.get(42).?);
 }

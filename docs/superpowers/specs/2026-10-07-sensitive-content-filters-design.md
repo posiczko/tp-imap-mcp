@@ -1,7 +1,7 @@
 # Sensitive-content filters — Design
 
 Date: 2026-10-07
-Status: Draft, awaiting review
+Status: Approved; plan `docs/superpowers/plans/2026-10-07-filters-and-sanitization.md`
 Extends: `docs/superpowers/specs/2026-10-07-tp-imap-mcp-design.md`
 Decision record: `docs/adr/0017-sensitive-content-filters.md`
 
@@ -211,3 +211,17 @@ Integration (`zig build itest`, live, read-only):
 
 - `src/c/regex.c` added to the C sources; libc only — no new dependency.
 - No new Zig packages.
+
+## 10. Implementation notes (from the verified prototype)
+
+- Withholding needs a live `EXAMINE` for UIDVALIDITY, so the tool-level
+  redaction is unit-tested through pure functions (`withheldBy`,
+  `headerGroups`/`writeHeaderObject`, `headerFieldValues`); the end-to-end
+  withholding path is covered by the live integration checks.
+- Verified 2026-10-07: unit tests pass; live checks 26/26 against the user's
+  Dovecot server (including the four filter checks).
+- Review fix pass (2026-10-07): header values are matched as the model will
+  see them — decoded, invisible characters removed, NBSP as a space — so
+  `Reset\u200B your password` still matches. `get_text`/`get_html` fetch a
+  body only for UIDs whose merged header data was received and matched no
+  filter (fail closed: no headers, no body).

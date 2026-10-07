@@ -66,7 +66,17 @@ pub const Settings = struct {
     mailbox_ttl: i64,
     /// PEM bundle used to verify server certificates (ADR 0016).
     ca_file: [:0]const u8,
+    /// `$XDG_CONFIG_HOME/tp-imap-mcp` or `$HOME/.config/tp-imap-mcp`; null
+    /// when neither is usable (ADR 0014). Holds the optional filters.zon.
+    config_dir: ?[]const u8 = null,
+    /// Per-body cap after sanitizing (ADR 0018).
+    max_body_bytes: usize = default_max_body_bytes,
+    /// Running budget per per-UID tool response (ADR 0018).
+    max_response_bytes: usize = default_max_response_bytes,
 };
+
+pub const default_max_body_bytes = 32 * 1024;
+pub const default_max_response_bytes = 128 * 1024;
 
 /// Homebrew's `ca-certificates` bundle on Apple Silicon.
 pub const default_ca_file = "/opt/homebrew/etc/ca-certificates/cert.pem";
@@ -74,7 +84,8 @@ pub const default_ca_file = "/opt/homebrew/etc/ca-certificates/cert.pem";
 pub const app_dir = "tp-imap-mcp";
 
 /// Reads TP_IMAP_MCP_CACHE, TP_IMAP_MCP_MAILBOX_TTL, TP_IMAP_MCP_CA_FILE,
-/// XDG_CACHE_HOME, HOME.
+/// TP_IMAP_MCP_MAX_BODY_BYTES, TP_IMAP_MCP_MAX_RESPONSE_BYTES,
+/// XDG_CONFIG_HOME, XDG_CACHE_HOME, HOME.
 pub fn loadSettings(arena: Allocator, env: anytype, diag: *std.Io.Writer) Error!Settings {
     const ttl_key = "TP_IMAP_MCP_MAILBOX_TTL";
     const ttl: i64 = if (nonEmpty(env, ttl_key)) |v|
@@ -82,21 +93,46 @@ pub fn loadSettings(arena: Allocator, env: anytype, diag: *std.Io.Writer) Error!
     else
         3600;
     const ca_file = try arena.dupeSentinel(u8, nonEmpty(env, "TP_IMAP_MCP_CA_FILE") orelse default_ca_file, 0);
+    const config_dir = try xdgDir(arena, env, "XDG_CONFIG_HOME", ".config");
+    const max_body = try sizeVar(env, diag, "TP_IMAP_MCP_MAX_BODY_BYTES", default_max_body_bytes);
+    const max_response = try sizeVar(env, diag, "TP_IMAP_MCP_MAX_RESPONSE_BYTES", default_max_response_bytes);
 
-    if (!try boolVar(env, diag, "TP_IMAP_MCP_CACHE", true))
-        return .{ .cache_dir = null, .cache_dir_unavailable = false, .mailbox_ttl = ttl, .ca_file = ca_file };
-
-    const base: ?[]const u8 = blk: {
-        if (nonEmpty(env, "XDG_CACHE_HOME")) |x| if (std.fs.path.isAbsolute(x)) break :blk x;
-        if (nonEmpty(env, "HOME")) |h| break :blk try std.fs.path.join(arena, &.{ h, ".cache" });
-        break :blk null;
-    };
-    return .{
-        .cache_dir = if (base) |b| try std.fs.path.join(arena, &.{ b, app_dir }) else null,
-        .cache_dir_unavailable = base == null,
+    if (!try boolVar(env, diag, "TP_IMAP_MCP_CACHE", true)) return .{
+        .cache_dir = null,
+        .cache_dir_unavailable = false,
         .mailbox_ttl = ttl,
         .ca_file = ca_file,
+        .config_dir = config_dir,
+        .max_body_bytes = max_body,
+        .max_response_bytes = max_response,
     };
+
+    const cache_dir = try xdgDir(arena, env, "XDG_CACHE_HOME", ".cache");
+    return .{
+        .cache_dir = cache_dir,
+        .cache_dir_unavailable = cache_dir == null,
+        .mailbox_ttl = ttl,
+        .ca_file = ca_file,
+        .config_dir = config_dir,
+        .max_body_bytes = max_body,
+        .max_response_bytes = max_response,
+    };
+}
+
+/// A byte count >= 1024, or `default` when unset.
+fn sizeVar(env: anytype, diag: *std.Io.Writer, key: []const u8, default: usize) Error!usize {
+    const v = nonEmpty(env, key) orelse return default;
+    const n = std.fmt.parseInt(usize, v, 10) catch return fail(diag, "{s} must be a number of bytes >= 1024", .{key});
+    if (n < 1024) return fail(diag, "{s} must be a number of bytes >= 1024", .{key});
+    return n;
+}
+
+/// `$<xdg_var>/tp-imap-mcp` if that variable is absolute, else
+/// `$HOME/<home_sub>/tp-imap-mcp`, else null.
+fn xdgDir(arena: Allocator, env: anytype, xdg_var: []const u8, home_sub: []const u8) Allocator.Error!?[]const u8 {
+    if (nonEmpty(env, xdg_var)) |x| if (std.fs.path.isAbsolute(x)) return try std.fs.path.join(arena, &.{ x, app_dir });
+    if (nonEmpty(env, "HOME")) |h| return try std.fs.path.join(arena, &.{ h, home_sub, app_dir });
+    return null;
 }
 
 /// Case-insensitive lookup by configured name.
@@ -250,6 +286,16 @@ test "settings: XDG cache location, HOME fallback, disable switch, TTL" {
     try testing.expectEqual(3600, xdg.mailbox_ttl);
     try testing.expectEqualStrings(default_ca_file, xdg.ca_file);
 
+    try testing.expectEqualStrings("/home/me/.config/tp-imap-mcp", xdg.config_dir.?);
+    const cfg = try settingsFrom(a, testEnv(.{ .{ "XDG_CONFIG_HOME", "/x/config" }, .{ "HOME", "/home/me" } }));
+    try testing.expectEqualStrings("/x/config/tp-imap-mcp", cfg.config_dir.?);
+
+    try testing.expectEqual(32 * 1024, xdg.max_body_bytes);
+    try testing.expectEqual(128 * 1024, xdg.max_response_bytes);
+    const caps = try settingsFrom(a, testEnv(.{ .{ "TP_IMAP_MCP_MAX_BODY_BYTES", "4096" }, .{ "TP_IMAP_MCP_MAX_RESPONSE_BYTES", "1048576" } }));
+    try testing.expectEqual(4096, caps.max_body_bytes);
+    try testing.expectEqual(1048576, caps.max_response_bytes);
+
     const ca = try settingsFrom(a, testEnv(.{.{ "TP_IMAP_MCP_CA_FILE", "/etc/ssl/cert.pem" }}));
     try testing.expectEqualStrings("/etc/ssl/cert.pem", ca.ca_file);
 
@@ -266,6 +312,8 @@ test "settings: XDG cache location, HOME fallback, disable switch, TTL" {
 
     try expectInvalidSettings(testEnv(.{.{ "TP_IMAP_MCP_MAILBOX_TTL", "-5" }}), "TP_IMAP_MCP_MAILBOX_TTL must be a number of seconds >= 0");
     try expectInvalidSettings(testEnv(.{.{ "TP_IMAP_MCP_CACHE", "maybe" }}), "TP_IMAP_MCP_CACHE must be one of 1/true/yes/0/false/no");
+    try expectInvalidSettings(testEnv(.{.{ "TP_IMAP_MCP_MAX_BODY_BYTES", "100" }}), "TP_IMAP_MCP_MAX_BODY_BYTES must be a number of bytes >= 1024");
+    try expectInvalidSettings(testEnv(.{.{ "TP_IMAP_MCP_MAX_RESPONSE_BYTES", "lots" }}), "TP_IMAP_MCP_MAX_RESPONSE_BYTES must be a number of bytes >= 1024");
 }
 
 fn expectInvalidSettings(e: TestEnv, comptime expected_diag: []const u8) !void {

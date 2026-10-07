@@ -97,11 +97,28 @@ int tpi_append(tpi_session *s, const char *mailbox, const char *data, size_t len
 
 /* MIME: concatenate every non-attachment text/<subtype> part of a full
  * RFC 822 message, transfer-decoded and converted to UTF-8 where possible.
+ * *parts_found counts the matching parts (so "no part" and "empty part" can
+ * be told apart).
  * If the top-level type is multipart/encrypted, *encrypted_protocol is set to
  * a malloc'd copy of its protocol parameter ("" if absent) and *out is NULL.
  * Release *out and *encrypted_protocol with tpi_buf_free. */
 int tpi_extract_text(const char *msg, size_t len, const char *subtype,
-                     char **out, size_t *out_len, char **encrypted_protocol);
+                     char **out, size_t *out_len, size_t *parts_found,
+                     char **encrypted_protocol);
 void tpi_buf_free(char *buf);
+
+/* RFC 2047: decode encoded-words in a header value to UTF-8 (unencoded text
+ * is taken as UTF-8). Release *out with tpi_buf_free. */
+int tpi_decode_header_value(const char *raw, size_t len, char **out, size_t *out_len);
+
+/* POSIX extended regex, case-insensitive, match/no-match only (ADR 0017). */
+typedef struct tpi_regex tpi_regex;
+
+/* Returns NULL on failure with a message in err (always NUL-terminated when
+ * errlen > 0). */
+tpi_regex *tpi_regex_compile(const char *pattern, char *err, size_t errlen);
+/* 1 if `text` (NUL-terminated) contains a match, else 0. */
+int tpi_regex_match(const tpi_regex *r, const char *text);
+void tpi_regex_free(tpi_regex *r);
 
 #endif

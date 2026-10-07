@@ -8,7 +8,9 @@ const config = @import("config.zig");
 const imap = @import("imap/session.zig");
 const mutf7 = @import("imap/mutf7.zig");
 const Store = @import("cache/store.zig").Store;
+const Filter = @import("filter/rules.zig").Filter;
 const text = @import("text.zig");
+const unicode = @import("sanitize/unicode.zig");
 
 pub const Session = imap.Session;
 pub const Error = imap.Error || error{LoginFailed};
@@ -22,6 +24,9 @@ pub const Registry = struct {
     accounts: []config.Account,
     settings: config.Settings,
     slots: []Slot,
+    /// Active sensitive-content filters per account (ADR 0017); set by main
+    /// after loading filters. Empty means no filtering.
+    active_filters: []const []const *const Filter = &.{},
     /// Human-readable cause of the most recent failure (no secrets).
     diag_buf: [512]u8 = undefined,
     diag_len: usize = 0,
@@ -59,6 +64,10 @@ pub const Registry = struct {
         return null;
     }
 
+    pub fn filtersFor(self: *const Registry, idx: usize) []const *const Filter {
+        return if (idx < self.active_filters.len) self.active_filters[idx] else &.{};
+    }
+
     pub fn diag(self: *const Registry) []const u8 {
         return self.diag_buf[0..self.diag_len];
     }
@@ -93,7 +102,8 @@ pub const Registry = struct {
                     return err;
                 },
                 error.ServerRejected => {
-                    self.setDiag("IMAP server rejected the command: {s}", .{s.lastResponse()});
+                    var buf: [400]u8 = undefined;
+                    self.setDiag("IMAP server rejected the command: {s}", .{unicode.cleanInto(&buf, s.lastResponse())});
                     // The mailbox may have been renamed or deleted elsewhere.
                     if (self.cache(idx)) |store| store.markMailboxesStale() catch |e| self.cacheFailed(idx, e);
                     return err;
@@ -125,7 +135,8 @@ pub const Registry = struct {
             return err;
         };
         s.login(a.login, a.password) catch |err| {
-            self.setDiag("account \"{s}\": login failed: {s}", .{ a.name, s.lastResponse() });
+            var buf: [400]u8 = undefined;
+            self.setDiag("account \"{s}\": login failed: {s}", .{ a.name, unicode.cleanInto(&buf, s.lastResponse()) });
             s.abandon();
             return switch (err) {
                 error.ServerRejected => error.LoginFailed,

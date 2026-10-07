@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const config = @import("config.zig");
+const filter_load = @import("filter/load.zig");
 const mcp = @import("mcp.zig");
 const Registry = @import("accounts.zig").Registry;
 
@@ -12,12 +13,15 @@ pub fn main(init: std.process.Init) !u8 {
 
     const arena = init.arena.allocator();
     try stderr.writeAll(mcp.server_name ++ ": ");
-    const accounts, const settings = blk: {
+    const accounts, const settings, const active_filters = blk: {
         const accounts = config.load(arena, init.environ_map, stderr) catch |err| break :blk err;
         const settings = config.loadSettings(arena, init.environ_map, stderr) catch |err| break :blk err;
-        break :blk .{ accounts, settings };
+        // Filters fail closed: any problem stops startup (ADR 0017).
+        const library = filter_load.loadLibrary(arena, init.gpa, init.io, settings.config_dir, stderr) catch |err| break :blk err;
+        const active = filter_load.resolveActive(arena, library, init.environ_map, accounts, stderr) catch |err| break :blk err;
+        break :blk .{ accounts, settings, active };
     } catch |err| switch (err) {
-        error.InvalidConfig => {
+        error.InvalidConfig, error.InvalidFilters => {
             try stderr.writeAll("\n");
             try stderr.flush();
             return 1;
@@ -29,14 +33,21 @@ pub fn main(init: std.process.Init) !u8 {
         try stderr.flush();
         return 1;
     }
-    try stderr.print("serving {d} account(s) on stdio; cache: {s}\n", .{
+    try stderr.print("serving {d} account(s) on stdio; cache: {s}; filters:", .{
         accounts.len,
         settings.cache_dir orelse if (settings.cache_dir_unavailable) "off (set HOME or XDG_CACHE_HOME)" else "off",
     });
+    for (accounts, active_filters) |a, fs| {
+        try stderr.print(" {s}=", .{a.name});
+        if (fs.len == 0) try stderr.writeAll("none");
+        for (fs, 0..) |f, i| try stderr.print("{s}{s}", .{ if (i > 0) "," else "", f.name });
+    }
+    try stderr.writeAll("\n");
     try stderr.flush();
 
     var registry: Registry = try .init(init.gpa, accounts, settings);
     defer registry.deinit();
+    registry.active_filters = active_filters;
 
     var in_buf: [64 * 1024]u8 = undefined;
     var stdin_reader = std.Io.File.stdin().reader(init.io, &in_buf);
@@ -62,4 +73,12 @@ test {
     _ = @import("text.zig");
     _ = @import("tools.zig");
     _ = @import("validate.zig");
+    _ = @import("filter/regex.zig");
+    _ = @import("filter/glob.zig");
+    _ = @import("filter/rules.zig");
+    _ = @import("filter/load.zig");
+    _ = @import("sanitize/unicode.zig");
+    _ = @import("sanitize/entities.zig");
+    _ = @import("sanitize/limit.zig");
+    _ = @import("sanitize/html.zig");
 }
