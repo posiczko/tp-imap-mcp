@@ -200,6 +200,25 @@ pub const get_html =
     \\    directory: directory to read from
 ++ "\n" ++ uids_note ++ sanitized_note ++ withheld_note;
 
+pub const list_attachments =
+    \\List the attachments of the given UIDs: file name, content type, approximate
+    \\size in bytes, and whether the part is inline (e.g. an image embedded in
+    \\the HTML). Attachment content is never downloaded or returned.
+    \\
+    \\Args:
+    \\    directory: directory to read from
+++ "\n" ++ uids_note ++
+    \\
+    \\Return, e.g. for list_attachments(account, "INBOX", ["12", "13", "999"]):
+    \\    [ [{"filename": "invoice.pdf", "content_type": "application/pdf",
+    \\        "size": 48213, "inline": false}],
+    \\      [],
+    \\      null ]
+    \\
+    \\File names are sanitized (decoded, invisible characters and paths removed).
+    \\An attached e-mail without a name is listed as forwarded-message.eml.
+++ withheld_note;
+
 pub const get_size =
     \\Read the message size in bytes (RFC822.SIZE) for the given UIDs.
     \\

@@ -111,6 +111,23 @@ void tpi_buf_free(char *buf);
  * is taken as UTF-8). Release *out with tpi_buf_free. */
 int tpi_decode_header_value(const char *raw, size_t len, char **out, size_t *out_len);
 
+/* BODYSTRUCTURE leaf parts for list_attachments. Strings are malloc'd;
+ * params/disp_params are "name\x1fvalue" pairs joined by \x1e. */
+typedef struct {
+  uint32_t uid;
+  uint32_t size;      /* encoded size in bytes */
+  int base64;         /* 1 if Content-Transfer-Encoding is base64 */
+  char *content_type; /* "type/subtype" as sent */
+  char *disposition;  /* "" when absent */
+  char *params;       /* content-type parameters */
+  char *disp_params;  /* disposition parameters */
+} tpi_part;
+
+/* UID FETCH (UID BODYSTRUCTURE); forwarded messages are single leaves. */
+int tpi_uid_bodystructure(tpi_session *s, const uint32_t *uids, size_t uid_count,
+                          tpi_part **out, size_t *count);
+void tpi_parts_free(tpi_part *items, size_t count);
+
 /* POSIX extended regex, case-insensitive, match/no-match only (ADR 0017). */
 typedef struct tpi_regex tpi_regex;
 

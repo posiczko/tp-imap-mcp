@@ -63,3 +63,4 @@ choice. Options for configuration: (A) built-ins plus an optional config file;
 - New categories are added as built-ins (code) or by users (ZON) without
   changing tool signatures.
 - First use of `$XDG_CONFIG_HOME` (ADR 0014).
+- 2026-10-07: also applies to `list_attachments` (withheld marker; file names can be sensitive).

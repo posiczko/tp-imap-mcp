@@ -124,7 +124,7 @@ Then run the live read-only checks against each account (they print only PASS/FA
 
 ```bash
 op run --env-file imap.env -- zig build itest -- work
-# … 26 PASS lines …
+# … 29 PASS lines …
 # 0 failure(s)
 ```
 
@@ -309,6 +309,7 @@ Every tool except `list_accounts` takes an `account` argument.
 | `search` | UIDs matching IMAP SEARCH criteria (default `ALL` in `INBOX`) |
 | `get_header` / `get_header_field` | Raw headers, or one field, per UID |
 | `get_text` / `get_html` | Message body per UID as sanitized plain text (`get_text` prefers the plain-text part) |
+| `list_attachments` | Attachments per UID: file name, type, approximate size, inline flag — content is never downloaded |
 | `get_size` | Message size in bytes |
 | `get_keywords` / `change_keywords` | Read / add / remove IMAP flags and keywords |
 | `create_message` | Append a raw RFC 822 message to the Drafts folder |
@@ -413,6 +414,7 @@ The live checks print only PASS/FAIL lines and use a throwaway cache in `.zig-ca
 - [x] SQLite cache for mailbox list and headers/sizes (XDG)
 - [x] Sensitive-content filters — [spec](docs/superpowers/specs/2026-10-07-sensitive-content-filters-design.md) · [ADR 0017](docs/adr/0017-sensitive-content-filters.md)
 - [x] Output sanitization — [spec](docs/superpowers/specs/2026-10-07-output-sanitization-design.md) · [ADR 0018](docs/adr/0018-sanitize-model-bound-output.md) · [ADR 0019](docs/adr/0019-decoded-sanitized-header-values.md)
+- [x] Attachment listing (`list_attachments`, metadata only)
 - [ ] Built-in `one_time_codes` filter (2FA / magic-link emails)
 - [ ] Deferred minor issues — see [docs/TODO.md](docs/TODO.md)
 

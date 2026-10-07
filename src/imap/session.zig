@@ -57,6 +57,16 @@ pub const What = packed struct {
     }
 };
 
+pub const BodyPart = struct {
+    uid: u32,
+    size: u32,
+    base64: bool,
+    content_type: []const u8,
+    disposition: []const u8,
+    params: []const u8,
+    disp_params: []const u8,
+};
+
 pub const Fetched = struct {
     uid: u32,
     size: u32,
@@ -174,6 +184,26 @@ pub const Session = struct {
         const zs = try arena.alloc([*:0]const u8, flags.len);
         for (flags, zs) |f, *z| z.* = try arena.dupeSentinel(u8, f, 0);
         try check(c.tpi_uid_store_flags(self.handle, uids.ptr, uids.len, @intFromBool(add), zs.ptr, zs.len));
+    }
+
+    /// Leaf MIME parts per UID from BODYSTRUCTURE (no content downloaded).
+    pub fn uidBodyParts(self: *Session, arena: Allocator, uids: []const u32) Error![]BodyPart {
+        var ptr: ?[*]c.Part = null;
+        var n: usize = 0;
+        try check(c.tpi_uid_bodystructure(self.handle, uids.ptr, uids.len, &ptr, &n));
+        defer c.tpi_parts_free(ptr, n);
+        const items = (ptr orelse return &.{})[0..n];
+        const out = try arena.alloc(BodyPart, n);
+        for (items, out) |src, *dst| dst.* = .{
+            .uid = src.uid,
+            .size = src.size,
+            .base64 = src.base64 != 0,
+            .content_type = try arena.dupe(u8, std.mem.sliceTo(src.content_type, 0)),
+            .disposition = try arena.dupe(u8, std.mem.sliceTo(src.disposition, 0)),
+            .params = try arena.dupe(u8, std.mem.sliceTo(src.params, 0)),
+            .disp_params = try arena.dupe(u8, std.mem.sliceTo(src.disp_params, 0)),
+        };
+        return out;
     }
 
     pub fn append(self: *Session, mailbox: [:0]const u8, data: []const u8) Error!void {

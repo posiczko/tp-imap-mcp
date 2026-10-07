@@ -144,6 +144,11 @@ pub fn main(init: std.process.Init) !u8 {
         report(again != null, "reconnects after server-side logout", .{});
 
         try sanitizeChecks(h, acct, uids);
+        try attachmentChecks(h, acct, uids, "newest");
+        // The newest messages may have no attachments: also check large
+        // messages (> 400 KB), which usually do.
+        const large = try h.call("search", "{{\"account\":{s},\"directory\":\"INBOX\",\"criteria\":\"LARGER 400000\"}}", .{acct});
+        if (large) |m| if (m.array.items.len > 0) try attachmentChecks(h, acct, m.array.items, "large");
         try filterChecks(h, &reg, idx, acct, set);
     }
 
@@ -208,6 +213,11 @@ fn filterChecks(h: Harness, reg: *Registry, idx: usize, acct: []const u8, set: [
             items[1] == .null and items[2] == .string and std.mem.eql(u8, items[2].string, marker);
         report(ok, "filter: {s} withholds matched messages", .{tool});
     }
+    const att = try h.call("list_attachments", "{{\"account\":{s},\"directory\":\"INBOX\",\"uids\":{s}}}", .{ acct, set });
+    const ok_att = att != null and att.?.array.items.len == 3 and att.?.array.items[0] == .string and
+        std.mem.eql(u8, att.?.array.items[0].string, marker) and att.?.array.items[1] == .null;
+    report(ok_att, "filter: list_attachments withholds matched messages", .{});
+
     const hdr = try h.call("get_header", "{{\"account\":{s},\"directory\":\"INBOX\",\"uids\":{s}}}", .{ acct, set });
     const ok_hdr = blk: {
         const obj = (hdr orelse break :blk false).array.items[0].object;
@@ -266,4 +276,38 @@ fn containsHtmlTag(body: []const u8) bool {
         }
     }
     return false;
+}
+
+/// list_attachments on the newest messages: one entry per UID, each a list
+/// of well-formed, sanitized attachment records. Prints counts only.
+fn attachmentChecks(h: Harness, acct: []const u8, uids: []const std.json.Value, label: []const u8) !void {
+    const n = @min(uids.len, 10);
+    var list: std.ArrayList(u8) = .empty;
+    try list.append(h.arena, '[');
+    for (uids[uids.len - n ..], 0..) |u, i| {
+        if (i > 0) try list.append(h.arena, ',');
+        try list.print(h.arena, "\"{s}\"", .{u.string});
+    }
+    try list.appendSlice(h.arena, ",\"4294967295\"]");
+    const r = try h.call("list_attachments", "{{\"account\":{s},\"directory\":\"INBOX\",\"uids\":{s}}}", .{ acct, list.items });
+    var ok = r != null and r.?.array.items.len == n + 1 and r.?.array.items[n] == .null;
+    var total: usize = 0;
+    if (r) |v| for (v.array.items[0..@min(n, v.array.items.len)]) |item| {
+        if (item != .array) {
+            ok = false;
+            continue;
+        }
+        for (item.array.items) |a| {
+            total += 1;
+            const o = a.object;
+            const name = (o.get("filename") orelse {
+                ok = false;
+                continue;
+            }).string;
+            if (name.len == 0 or name.len > 255 or std.mem.findAny(u8, name, "/\\") != null) ok = false;
+            if ((try unicode.clean(h.arena, name)).ptr != name.ptr) ok = false;
+            if (o.get("content_type") == null or o.get("size") == null or o.get("inline") == null) ok = false;
+        }
+    };
+    report(ok, "list_attachments on {d} {s} messages: {d} attachments, well-formed and sanitized; null for missing uid", .{ n, label, total });
 }

@@ -10,6 +10,7 @@ const desc = @import("descriptions.zig");
 const headers = @import("headers.zig");
 const listmatch = @import("listmatch.zig");
 const filter = @import("filter/rules.zig");
+const attachments = @import("attachments.zig");
 const unicode = @import("sanitize/unicode.zig");
 const limit = @import("sanitize/limit.zig");
 const mutf7 = @import("imap/mutf7.zig");
@@ -196,6 +197,7 @@ pub const tools = [_]Tool{
     }, .handler = getHeaderField },
     .{ .name = "get_text", .description = desc.get_text, .params = &.{ p_account, p_directory, p_uids }, .handler = getText },
     .{ .name = "get_html", .description = desc.get_html, .params = &.{ p_account, p_directory, p_uids }, .handler = getHtml },
+    .{ .name = "list_attachments", .description = desc.list_attachments, .params = &.{ p_account, p_directory, p_uids }, .handler = listAttachments },
     .{ .name = "get_size", .description = desc.get_size, .params = &.{ p_account, p_directory, p_uids }, .handler = getSize },
     .{ .name = "get_keywords", .description = desc.get_keywords, .params = &.{ p_account, p_directory, p_uids }, .handler = getKeywords },
     .{ .name = "change_keywords", .description = desc.change_keywords, .params = &.{
@@ -554,6 +556,70 @@ fn filteredBodies(ctx: *Ctx, idx: usize, kind: body.Kind) Failure![]const u8 {
     return ctx.json(out);
 }
 
+fn writeAttachments(jw: *Stringify, atts: []const attachments.Attachment) Stringify.Error!void {
+    try jw.beginArray();
+    for (atts) |att| try jw.write(.{
+        .filename = att.filename,
+        .content_type = att.content_type,
+        .size = att.size,
+        .@"inline" = att.inline_,
+    });
+    try jw.endArray();
+}
+
+fn attachmentsJson(arena: Allocator, atts: []const attachments.Attachment) Allocator.Error![]const u8 {
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    var jw: Stringify = .{ .writer = &aw.writer };
+    writeAttachments(&jw, atts) catch return error.OutOfMemory;
+    return aw.written();
+}
+
+fn listAttachments(ctx: *Ctx) Failure![]const u8 {
+    const idx = try ctx.account();
+    const mailbox = try ctx.mailbox("directory", null);
+    const uids = try ctx.uids();
+    var op: AttachmentsOp = .{
+        .arena = ctx.arena,
+        .headers = .{ .arena = ctx.arena, .registry = ctx.registry, .idx = idx, .mailbox = mailbox, .uids = uids },
+        .active = ctx.registry.filtersFor(idx),
+    };
+    try ctx.imapRun(idx, &op);
+
+    var budget: limit.Budget = .init(ctx.registry.settings.max_response_bytes);
+    var aw: std.Io.Writer.Allocating = .init(ctx.arena);
+    var jw: Stringify = .{ .writer = &aw.writer };
+    jw.beginArray() catch return error.OutOfMemory;
+    for (uids) |u| {
+        if (op.withheld.get(u)) |name| {
+            jw.write(try filter.marker(ctx.arena, name)) catch return error.OutOfMemory;
+            continue;
+        }
+        var leaves: std.ArrayList(attachments.Part) = .empty;
+        for (op.parts) |p| if (p.uid == u) try leaves.append(ctx.arena, .{
+            .content_type = p.content_type,
+            .disposition = p.disposition,
+            .params = p.params,
+            .disp_params = p.disp_params,
+            .size = p.size,
+            .base64 = p.base64,
+        });
+        if (leaves.items.len == 0) {
+            jw.write(null) catch return error.OutOfMemory; // no such message
+            continue;
+        }
+        const atts = try attachments.select(ctx.arena, leaves.items);
+        var size: usize = 0;
+        for (atts) |att| size += limit.jsonLen(att.filename) + limit.jsonLen(att.content_type) + 64;
+        if (admitItem(&budget, size, null)) {
+            writeAttachments(&jw, atts) catch return error.OutOfMemory;
+        } else {
+            jw.write(limit.omitted_text) catch return error.OutOfMemory;
+        }
+    }
+    jw.endArray() catch return error.OutOfMemory;
+    return aw.written();
+}
+
 fn getText(ctx: *Ctx) Failure![]const u8 {
     return bodies(ctx, .plain);
 }
@@ -763,6 +829,27 @@ fn classifyForBodies(
     }
     return allowed.items;
 }
+
+/// list_attachments: classify by headers first when filters are active (fail
+/// closed), then BODYSTRUCTURE for the allowed UIDs only.
+const AttachmentsOp = struct {
+    arena: Allocator,
+    headers: CachedHeadersOp,
+    active: []const *const filter.Filter,
+    parts: []imap.BodyPart = &.{},
+    withheld: std.AutoHashMapUnmanaged(u32, []const u8) = .empty,
+
+    pub fn run(self: *AttachmentsOp, s: *Session) accounts.Error!void {
+        self.withheld.clearRetainingCapacity();
+        self.parts = &.{};
+        const uidvalidity = try s.examine(self.headers.mailbox);
+        const allowed: []const u32 = if (self.active.len == 0) self.headers.uids else blk: {
+            try self.headers.afterExamine(s, uidvalidity);
+            break :blk try classifyForBodies(self.arena, self.active, self.headers.uids, self.headers.result, &self.withheld);
+        };
+        if (allowed.len > 0) self.parts = try s.uidBodyParts(self.arena, allowed);
+    }
+};
 
 const StoreOp = struct {
     arena: Allocator,
@@ -1117,4 +1204,31 @@ test "todo: withheld entries bypass the response budget" {
     try testing.expect(admitItem(&b, 50, null)); // first item always admitted
     try testing.expect(admitItem(&b, 50, "password_reset")); // withheld: kept regardless
     try testing.expect(!admitItem(&b, 50, null));
+}
+
+test "todo: list_attachments is offered with account, directory, uids" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var jw: Stringify = .{ .writer = &aw.writer };
+    try writeList(&jw);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
+    defer parsed.deinit();
+    for (parsed.value.array.items) |t| {
+        if (!std.mem.eql(u8, t.object.get("name").?.string, "list_attachments")) continue;
+        const req = t.object.get("inputSchema").?.object.get("required").?.array.items;
+        try testing.expectEqual(3, req.len);
+        return;
+    }
+    return error.TestExpectedTool;
+}
+
+test "todo: attachment JSON shape" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const atts = [_]attachments.Attachment{.{ .filename = "a.pdf", .content_type = "application/pdf", .size = 3, .inline_ = false }};
+    try testing.expectEqualStrings(
+        "[{\"filename\":\"a.pdf\",\"content_type\":\"application/pdf\",\"size\":3,\"inline\":false}]",
+        try attachmentsJson(a, &atts),
+    );
 }

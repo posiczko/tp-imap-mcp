@@ -49,3 +49,4 @@ defaults, fixed constants, or per-account values.
 - Long messages are truncated with a visible marker; the model can request
   fewer UIDs when the response budget is reached.
 - More CPU per body (tokenizing), negligible next to network I/O.
+- 2026-10-07: attachment file names from `list_attachments` are decoded, cleaned, path-stripped, and capped at 255 bytes.

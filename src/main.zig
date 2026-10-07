@@ -76,6 +76,7 @@ test {
     _ = @import("filter/glob.zig");
     _ = @import("filter/rules.zig");
     _ = @import("filter/load.zig");
+    _ = @import("attachments.zig");
     _ = @import("sanitize/unicode.zig");
     _ = @import("sanitize/entities.zig");
     _ = @import("sanitize/limit.zig");

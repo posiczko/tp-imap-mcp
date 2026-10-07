@@ -67,6 +67,18 @@ pub extern fn tpi_buf_free(buf: ?[*]u8) void;
 
 pub extern fn tpi_decode_header_value(raw: [*]const u8, len: usize, out: *?[*]u8, out_len: *usize) c_int;
 
+pub const Part = extern struct {
+    uid: u32,
+    size: u32,
+    base64: c_int,
+    content_type: [*:0]u8,
+    disposition: [*:0]u8,
+    params: [*:0]u8,
+    disp_params: [*:0]u8,
+};
+pub extern fn tpi_uid_bodystructure(s: *Session, uids: [*]const u32, uid_count: usize, out: *?[*]Part, count: *usize) c_int;
+pub extern fn tpi_parts_free(items: ?[*]Part, count: usize) void;
+
 pub const Regex = opaque {};
 pub extern fn tpi_regex_compile(pattern: [*:0]const u8, err: [*]u8, errlen: usize) ?*Regex;
 pub extern fn tpi_regex_match(r: *const Regex, text: [*:0]const u8) c_int;

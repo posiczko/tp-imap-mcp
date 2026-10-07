@@ -10,7 +10,13 @@ struct tpi_session {
   mailimap *imap;
 };
 
-static int map_error(int r) {
+int tpi_map_error(int r);
+static int map_error(int r) { return tpi_map_error(r); }
+
+/* Internal: shared with attach.c. */
+struct mailimap *tpi_imap(tpi_session *s) { return s->imap; }
+
+int tpi_map_error(int r) {
   switch (r) {
   case MAILIMAP_NO_ERROR:
   case MAILIMAP_NO_ERROR_AUTHENTICATED:

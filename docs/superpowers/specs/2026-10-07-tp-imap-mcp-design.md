@@ -189,6 +189,7 @@ reference, adjusted for multi-account and the deviations below (ADR 0012).
 | `get_text(account, directory, uids)` | `EXAMINE`; `UID FETCH (BODY.PEEK[])` | per input uid: string or `null` |
 | `get_html(account, directory, uids)` | same | per input uid: string or `null` |
 | `get_size(account, directory, uids)` | same as `get_header` | per input uid: integer or `null` |
+| `list_attachments(account, directory, uids)` *(new)* | `EXAMINE`; with active filters, headers first (fail closed); `UID FETCH (BODYSTRUCTURE)` | per input uid: `[{"filename","content_type","size","inline"}]`, `[]`, `null`, or the withheld marker |
 | `get_keywords(account, directory, uids)` | `EXAMINE`; `UID FETCH (FLAGS)` | per input uid: `{"<uid>": [flags]}` or `{"<uid>": null}` |
 | `change_keywords(account, directory, uids, keywords, set)` | `SELECT`; `UID STORE ±FLAGS (<keywords>)`; `UID FETCH (FLAGS)` | as `get_keywords`, reflecting flags after the store |
 | `create_message(account, content)` | `APPEND <drafts> {literal}` | `{"status": "OK", "data": ["<server text>"]}`; a rejected append is a tool error carrying the server text |
@@ -418,3 +419,22 @@ readable only by the user.
 - A `directory` argument that matches no mailbox exactly is resolved against
   the fresh cached mailbox list by its invisible-character-cleaned name.
 - `Registry.init` takes the per-account active filters (required).
+
+## 13. list_attachments (2026-10-07)
+
+- Leaf parts come from BODYSTRUCTURE (`src/c/attach.c`); no part content is
+  downloaded. A part is listed if it has a file name (disposition
+  `filename`/`filename*`, else content-type `name`/`name*`) or disposition
+  `attachment`; an attached `message/rfc822` is one entry
+  (`forwarded-message.eml` if unnamed) and is not descended into; a nameless
+  `attachment` is `unnamed-attachment`.
+- File names: RFC 2231 (single and continued, `charset'lang'` with UTF-8,
+  US-ASCII and ISO-8859-1 mapped; other charsets left to UTF-8 sanitizing),
+  RFC 2047 for plain values containing `=?`, invisible characters removed,
+  path components stripped, at most 255 bytes. Content type lower-cased, at
+  most 100 bytes. Size: encoded size, × 3/4 for base64.
+- Filters apply (withheld marker; headers classified first, fail closed); the
+  response budget applies.
+- Verified live: 29/29 checks, including 28 real attachments (PDF and inline
+  PNG) across large INBOX messages.
+
