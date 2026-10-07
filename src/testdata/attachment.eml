@@ -1,0 +1,14 @@
+From: a@example.org
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary=YY
+
+--YY
+Content-Type: text/plain
+
+the body
+--YY
+Content-Type: text/plain
+Content-Disposition: attachment; filename="notes.txt"
+
+ATTACHED TEXT
+--YY--

@@ -1,0 +1,16 @@
+From: a@example.org
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary=QQ
+
+--QQ
+Content-Type: text/plain
+
+outer
+--QQ
+Content-Type: message/rfc822
+
+From: b@example.org
+Content-Type: text/plain
+
+inner
+--QQ--

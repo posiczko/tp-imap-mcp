@@ -1,0 +1,107 @@
+/* Flat C interface over libetpan, consumed from Zig via hand-written externs
+ * in src/imap/c.zig. Keep the two in sync. All returned buffers are malloc'd
+ * and released with the matching tpi_*_free function. */
+#ifndef TPI_H
+#define TPI_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+enum {
+  TPI_OK = 0,
+  TPI_ERR_CONNECT = 1,  /* TCP/TLS connect failed */
+  TPI_ERR_STREAM = 2,   /* connection dropped mid-command */
+  TPI_ERR_SERVER = 3,   /* server replied NO or BAD; see tpi_last_response */
+  TPI_ERR_PARSE = 4,    /* unparseable server response */
+  TPI_ERR_MEMORY = 5,
+  TPI_ERR_OTHER = 6,
+  TPI_ERR_TLS = 7,      /* TLS handshake failed, e.g. untrusted certificate */
+};
+
+typedef struct tpi_session tpi_session;
+
+tpi_session *tpi_new(void);
+void tpi_free(tpi_session *s);
+
+/* Implicit TLS connect. The server certificate chain is verified against the
+ * PEM bundle ca_file and SNI is set to host; a failure returns TPI_ERR_TLS.
+ * The certificate's host name is NOT checked here: the caller must check it
+ * (tpi_peer_certificate) before sending credentials. timeout_sec applies to
+ * every network operation. */
+int tpi_connect(tpi_session *s, const char *host, uint16_t port, long timeout_sec,
+                const char *ca_file);
+
+/* DER encoding of the connected server's certificate. Returns its length, or
+ * -1 if unavailable. Release *der with tpi_buf_free. */
+long tpi_peer_certificate(tpi_session *s, char **der);
+int tpi_login(tpi_session *s, const char *user, const char *password);
+int tpi_noop(tpi_session *s);
+int tpi_logout(tpi_session *s);
+/* On success *uidvalidity is the mailbox's UIDVALIDITY (0 if the server did
+ * not report one). */
+int tpi_examine(tpi_session *s, const char *mailbox, uint32_t *uidvalidity);
+int tpi_select(tpi_session *s, const char *mailbox, uint32_t *uidvalidity);
+
+/* Text of the last server response line (e.g. "Unknown argument BOGUSKEY"),
+ * or "" if none. Valid until the next call on this session. */
+const char *tpi_last_response(tpi_session *s);
+
+/* Sends "UID SEARCH <criteria>" verbatim; caller has already validated it. */
+int tpi_uid_search(tpi_session *s, const char *criteria, uint32_t **uids, size_t *count);
+void tpi_uids_free(uint32_t *uids);
+
+typedef struct {
+  char *name;   /* raw (modified UTF-7) mailbox name */
+  char delimiter; /* 0 when the server reports NIL */
+  char *flags;  /* space-separated, each with leading backslash */
+} tpi_mailbox;
+
+int tpi_list(tpi_session *s, const char *reference, const char *pattern,
+             tpi_mailbox **out, size_t *count);
+void tpi_mailboxes_free(tpi_mailbox *items, size_t count);
+
+typedef struct {
+  uint32_t messages;
+  uint32_t recent;
+  uint32_t unseen;
+} tpi_status;
+
+int tpi_status_get(tpi_session *s, const char *mailbox, tpi_status *out);
+
+enum {
+  TPI_FETCH_HEADER = 1, /* BODY.PEEK[HEADER] */
+  TPI_FETCH_BODY = 2,   /* BODY.PEEK[]       */
+  TPI_FETCH_SIZE = 4,   /* RFC822.SIZE       */
+  TPI_FETCH_FLAGS = 8,  /* FLAGS             */
+};
+
+typedef struct {
+  uint32_t uid;
+  uint32_t size;  /* RFC822.SIZE, valid with TPI_FETCH_SIZE */
+  char *data;     /* header or full message bytes; NULL if not fetched */
+  size_t data_len;
+  char *flags;    /* space-separated; NULL if not fetched */
+} tpi_fetch_item;
+
+/* Items come back in server order; the Zig layer aligns them to input. */
+int tpi_uid_fetch(tpi_session *s, const uint32_t *uids, size_t uid_count, int what,
+                  tpi_fetch_item **out, size_t *count);
+void tpi_fetch_free(tpi_fetch_item *items, size_t count);
+
+/* UID STORE <uids> +FLAGS/-FLAGS (<flags>). Flags are "\\Seen"-style system
+ * flags or keyword atoms, already validated. */
+int tpi_uid_store_flags(tpi_session *s, const uint32_t *uids, size_t uid_count, int add,
+                        const char *const *flags, size_t flag_count);
+
+int tpi_append(tpi_session *s, const char *mailbox, const char *data, size_t len);
+
+/* MIME: concatenate every non-attachment text/<subtype> part of a full
+ * RFC 822 message, transfer-decoded and converted to UTF-8 where possible.
+ * If the top-level type is multipart/encrypted, *encrypted_protocol is set to
+ * a malloc'd copy of its protocol parameter ("" if absent) and *out is NULL.
+ * Release *out and *encrypted_protocol with tpi_buf_free. */
+int tpi_extract_text(const char *msg, size_t len, const char *subtype,
+                     char **out, size_t *out_len, char **encrypted_protocol);
+void tpi_buf_free(char *buf);
+
+#endif

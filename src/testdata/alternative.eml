@@ -1,0 +1,13 @@
+From: a@example.org
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary=XX
+
+--XX
+Content-Type: text/plain; charset=utf-8
+
+hello plain
+--XX
+Content-Type: text/html; charset=utf-8
+
+<p>hello html</p>
+--XX--

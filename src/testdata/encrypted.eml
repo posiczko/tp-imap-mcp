@@ -1,0 +1,15 @@
+From: a@example.org
+MIME-Version: 1.0
+Content-Type: multipart/encrypted; protocol="application/pgp-encrypted"; boundary=ZZ
+
+--ZZ
+Content-Type: application/pgp-encrypted
+
+Version: 1
+--ZZ
+Content-Type: application/octet-stream
+
+-----BEGIN PGP MESSAGE-----
+hQEMA
+-----END PGP MESSAGE-----
+--ZZ--

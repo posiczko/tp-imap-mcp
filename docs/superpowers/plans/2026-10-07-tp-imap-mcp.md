@@ -2,21 +2,23 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A Zig 0.17 MCP server (stdio) that mirrors vivier/imap-mcp-server's tools across multiple IMAP accounts, using libetpan for IMAP and MIME, with credentials injected by `op run`.
+**Goal:** A Zig 0.17 MCP server (stdio) that mirrors vivier/imap-mcp-server's tools across multiple IMAP accounts, using libetpan for IMAP and MIME, with credentials injected by `op run` and an XDG/SQLite cache for the mailbox list and message headers/sizes.
 
-**Architecture:** A flat C shim (`src/c/`) wraps libetpan and is called from Zig through hand-written `extern` declarations (Zig 0.17 has no `@cImport`). Above it, small Zig modules handle config, account sessions with reconnect, validation, header/body rendering, tool handlers, and newline-delimited JSON-RPC over stdio.
+**Architecture:** A flat C shim (`src/c/`) wraps libetpan and is called from Zig through hand-written `extern` declarations (Zig 0.17 has no `@cImport`). SQLite (system `libsqlite3`) is reached the same way. Above them, small Zig modules handle config, account sessions with reconnect, the per-account cache, validation, header/body rendering, tool handlers, and newline-delimited JSON-RPC over stdio.
 
-**Tech Stack:** Zig 0.17.0, libetpan 1.10.1 (Homebrew, via pkg-config), libc, `std.json`, `std.Io`.
+**Tech Stack:** Zig 0.17.0, libetpan 1.10.1 (Homebrew, via pkg-config), system libsqlite3, libc, `std.json`, `std.Io`.
 
-**Spec:** `docs/superpowers/specs/2026-10-07-tp-imap-mcp-design.md`
+**Spec:** `docs/superpowers/specs/2026-10-07-tp-imap-mcp-design.md` (decisions: `docs/adr/0001`–`0015`)
 
-**Provenance:** Every code block below was compiled and tested before this plan was written: 47/47 unit tests pass, and `zig build itest` passed 13/13 live checks against the user's Dovecot server. Copy code exactly; if something does not compile, the environment differs from the one verified — stop and report rather than improvising.
+**Provenance:** Every code block below was compiled and tested before this plan was written: 61/61 unit tests pass. The pre-cache version passed 12/12 live checks against the user's Dovecot server; the cache's live checks run for the first time in Task 14. Copy code exactly; if something does not compile, the environment differs from the one verified — stop and report rather than improvising.
 
 ## Global Constraints
 
 - Zig 0.17.0 exactly (`zig version`). No `@cImport` (removed in 0.17); C is reached only through `src/imap/c.zig` externs that mirror `src/c/tpi.h`.
 - Platform: macOS on Apple Silicon. libetpan comes from Homebrew (`brew install libetpan`; `pkg-config --libs libetpan` must succeed).
-- No new Zig package dependencies (`build.zig.zon` keeps an empty `dependencies`). Ask the user before adding any dependency.
+- No Zig package dependencies (`build.zig.zon` keeps an empty `dependencies`). C libraries: Homebrew libetpan and the OS `libsqlite3` only. Ask the user before adding any dependency.
+- Local data lives only in XDG locations (`$XDG_CACHE_HOME/tp-imap-mcp` or `~/.cache/tp-imap-mcp`); tests and itest never write to `~/.cache`.
+- A cache failure must never fail a tool call.
 - C sources compile with `-std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror`.
 - Passwords never appear in logs, diagnostics, tool output, or test output.
 - `criteria` is sent verbatim: CR, LF, NUL must be rejected before it reaches the server.
@@ -30,7 +32,8 @@
 2. Mailbox names containing `"`, `\`, `%`, `*`, or the empty root name must pass through modified-UTF-7 encoding unchanged so libetpan can quote them — pinned by `mutf7.zig` "quoting-sensitive characters pass through unchanged" (Task 4).
 3. A header block starting with a continuation line or containing colon-less junk must parse without crashing and without inventing headers — pinned by `headers.zig` "leading continuation and colon-less lines are skipped" (Task 6).
 4. A trailing comma in `IMAP_ACCOUNTS` (`a,`) is a common typo and must be a clear config error, not a silent extra account — pinned in `config.zig` "rejects missing, malformed, duplicate" (Task 7).
-5. JSON-RPC `id: 0` must be echoed (not treated as absent) and `tools/call` without `arguments` must work for argument-less tools — pinned by `mcp.zig` "id 0 is echoed and arguments may be omitted" (Task 10).
+5. JSON-RPC `id: 0` must be echoed (not treated as absent) and `tools/call` without `arguments` must work for argument-less tools — pinned by `mcp.zig` "id 0 is echoed and arguments may be omitted" (Task 13).
+6. A cache file that is not a database (truncated, overwritten) must be rebuilt, not crash or disable the account's tools — pinned by `store.zig` "a non-database file reports SqliteCorrupt" (Task 10) and `accounts.zig` "corrupt cache file is rebuilt" (Task 11).
 
 ## File Map
 
@@ -46,11 +49,14 @@
 | `src/imap/mutf7.zig` | 4 | Modified UTF-7 mailbox names |
 | `src/validate.zig` | 5 | Injection-defense argument checks |
 | `src/headers.zig` | 6 | Header block parsing |
-| `src/config.zig` | 7 | Environment → accounts |
-| `src/accounts.zig` | 8 | Session registry, reconnect, drafts discovery |
-| `src/descriptions.zig`, `src/tools.zig` | 9 | Tool schemas and handlers |
-| `src/prompts.zig`, `src/mcp.zig` | 10 | Prompts and JSON-RPC loop |
-| `src/main.zig`, `src/itest.zig`, `imap.env.example` | 1, 11 | Entry point, live checks, config example |
+| `src/config.zig` | 7 | Environment → accounts and cache settings (XDG) |
+| `src/listmatch.zig` | 8 | Local LIST pattern matching |
+| `src/cache/sqlite.zig` | 9 | SQLite externs and thin wrapper |
+| `src/cache/store.zig` | 10 | Cache schema and operations |
+| `src/accounts.zig` | 11 | Session registry, reconnect, cache, mailbox list, drafts discovery |
+| `src/descriptions.zig`, `src/tools.zig` | 12 | Tool schemas and handlers (incl. cached headers, `clear_cache`) |
+| `src/prompts.zig`, `src/mcp.zig` | 13 | Prompts and JSON-RPC loop |
+| `src/main.zig`, `src/itest.zig`, `imap.env.example` | 1, 14 | Entry point, live checks, config example |
 
 ---
 
@@ -71,12 +77,12 @@
   types `Mailbox{name, delimiter: ?u8, flags}`, `Status{messages, recent, unseen}`, `What{header, body, size, flags: bool}`,
   `Fetched{uid, size, data: ?[]const u8, flags: ?[]const []const u8}`;
   `extractText(arena, message, subtype: [:0]const u8) Error!Extracted` where `Extracted = union(enum){ text, encrypted }`.
-- Produces (`build.zig`): steps `test` (root `src/main.zig`), `run`, `itest` (root `src/itest.zig`).
+- Produces (`build.zig`): steps `test` (root `src/main.zig`), `run`, `itest` (root `src/itest.zig`); every module links libetpan and the system `libsqlite3` (used from Task 9).
 
 - [ ] **Step 1: Confirm toolchain**
 
 Run: `zig version && pkg-config --modversion libetpan`
-Expected: `0.17.0` and `1.10.1`. If libetpan is missing: `brew install libetpan` (the user approved libetpan via Homebrew).
+Expected: `0.17.0` and `1.10.1`. If libetpan is missing: `brew install libetpan` (the user approved libetpan via Homebrew). SQLite needs nothing: the macOS SDK provides `libsqlite3`.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -158,6 +164,7 @@ fn imapModule(b: *std.Build, root: []const u8, target: std.Build.ResolvedTarget,
         .flags = &.{ "-std=c11", "-D_DEFAULT_SOURCE", "-Wall", "-Wextra", "-Werror" },
     });
     mod.linkSystemLibrary("etpan", .{});
+    mod.linkSystemLibrary("sqlite3", .{});
     return mod;
 }
 ```
@@ -210,8 +217,10 @@ int tpi_connect(tpi_session *s, const char *host, uint16_t port, long timeout_se
 int tpi_login(tpi_session *s, const char *user, const char *password);
 int tpi_noop(tpi_session *s);
 int tpi_logout(tpi_session *s);
-int tpi_examine(tpi_session *s, const char *mailbox);
-int tpi_select(tpi_session *s, const char *mailbox);
+/* On success *uidvalidity is the mailbox's UIDVALIDITY (0 if the server did
+ * not report one). */
+int tpi_examine(tpi_session *s, const char *mailbox, uint32_t *uidvalidity);
+int tpi_select(tpi_session *s, const char *mailbox, uint32_t *uidvalidity);
 
 /* Text of the last server response line (e.g. "Unknown argument BOGUSKEY"),
  * or "" if none. Valid until the next call on this session. */
@@ -348,12 +357,24 @@ int tpi_noop(tpi_session *s) { return map_error(mailimap_noop(s->imap)); }
 
 int tpi_logout(tpi_session *s) { return map_error(mailimap_logout(s->imap)); }
 
-int tpi_examine(tpi_session *s, const char *mailbox) {
-  return map_error(mailimap_examine(s->imap, mailbox));
+static uint32_t selected_uidvalidity(tpi_session *s) {
+  return s->imap->imap_selection_info != NULL ? s->imap->imap_selection_info->sel_uidvalidity : 0;
 }
 
-int tpi_select(tpi_session *s, const char *mailbox) {
-  return map_error(mailimap_select(s->imap, mailbox));
+int tpi_examine(tpi_session *s, const char *mailbox, uint32_t *uidvalidity) {
+  *uidvalidity = 0;
+  int rc = map_error(mailimap_examine(s->imap, mailbox));
+  if (rc == TPI_OK)
+    *uidvalidity = selected_uidvalidity(s);
+  return rc;
+}
+
+int tpi_select(tpi_session *s, const char *mailbox, uint32_t *uidvalidity) {
+  *uidvalidity = 0;
+  int rc = map_error(mailimap_select(s->imap, mailbox));
+  if (rc == TPI_OK)
+    *uidvalidity = selected_uidvalidity(s);
+  return rc;
 }
 
 const char *tpi_last_response(tpi_session *s) {
@@ -998,8 +1019,8 @@ pub extern fn tpi_connect(s: *Session, host: [*:0]const u8, port: u16, timeout_s
 pub extern fn tpi_login(s: *Session, user: [*:0]const u8, password: [*:0]const u8) c_int;
 pub extern fn tpi_noop(s: *Session) c_int;
 pub extern fn tpi_logout(s: *Session) c_int;
-pub extern fn tpi_examine(s: *Session, mailbox: [*:0]const u8) c_int;
-pub extern fn tpi_select(s: *Session, mailbox: [*:0]const u8) c_int;
+pub extern fn tpi_examine(s: *Session, mailbox: [*:0]const u8, uidvalidity: *u32) c_int;
+pub extern fn tpi_select(s: *Session, mailbox: [*:0]const u8, uidvalidity: *u32) c_int;
 pub extern fn tpi_last_response(s: *Session) [*:0]const u8;
 
 pub extern fn tpi_uid_search(s: *Session, criteria: [*:0]const u8, uids: *?[*]u32, count: *usize) c_int;
@@ -1120,12 +1141,18 @@ pub const Session = struct {
         try check(c.tpi_noop(self.handle));
     }
 
-    pub fn examine(self: *Session, mailbox: [:0]const u8) Error!void {
-        try check(c.tpi_examine(self.handle, mailbox));
+    /// Opens `mailbox` read-only; returns its UIDVALIDITY (0 if unreported).
+    pub fn examine(self: *Session, mailbox: [:0]const u8) Error!u32 {
+        var uv: u32 = 0;
+        try check(c.tpi_examine(self.handle, mailbox, &uv));
+        return uv;
     }
 
-    pub fn select(self: *Session, mailbox: [:0]const u8) Error!void {
-        try check(c.tpi_select(self.handle, mailbox));
+    /// Opens `mailbox` read-write; returns its UIDVALIDITY (0 if unreported).
+    pub fn select(self: *Session, mailbox: [:0]const u8) Error!u32 {
+        var uv: u32 = 0;
+        try check(c.tpi_select(self.handle, mailbox, &uv));
+        return uv;
     }
 
     /// `criteria` must already be validated (no CR/LF/NUL).
@@ -1353,7 +1380,7 @@ pub fn toCrlf(arena: Allocator, in: []const u8) Allocator.Error![]const u8 {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `zig build test --summary all`
-Expected: all tests pass (Task 1 test + 5 new).
+Expected: 7/7 tests pass.
 
 - [ ] **Checkpoint: hand off for commit**
 
@@ -1500,7 +1527,7 @@ pub fn render(arena: Allocator, message: []const u8, kind: Kind) session.Error![
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `zig build test --summary all`
-Expected: all tests pass, including the 9 in `mime_test.zig`.
+Expected: 16/16 tests pass.
 
 - [ ] **Checkpoint: hand off for commit**
 
@@ -1721,7 +1748,7 @@ pub fn encode(gpa: Allocator, in: []const u8) EncodeError![]u8 {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `zig build test --summary all`
-Expected: all tests pass, including 8 in `mutf7.zig`.
+Expected: 24/24 tests pass.
 
 - [ ] **Checkpoint: hand off for commit**
 
@@ -1888,7 +1915,7 @@ pub fn mailbox(s: []const u8) Error!void {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `zig build test --summary all`
-Expected: all tests pass, including 5 in `validate.zig`.
+Expected: 29/29 tests pass.
 
 - [ ] **Checkpoint: hand off for commit**
 
@@ -2009,7 +2036,7 @@ pub fn parse(arena: Allocator, raw: []const u8) Allocator.Error![]Header {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `zig build test --summary all`
-Expected: all tests pass, including 3 in `headers.zig`.
+Expected: 32/32 tests pass.
 
 - [ ] **Checkpoint: hand off for commit**
 
@@ -2023,7 +2050,7 @@ ready and suggest the message: `feat: RFC 5322 header block parsing`
 - Modify: `src/main.zig` (test block)
 
 **Interfaces:**
-- Produces: `config.Account{ name, host: [:0]const u8, port: u16, login: [:0]const u8, password: [:0]u8, readonly: bool, drafts: ?[]const u8 }` with `wipe()`; `config.load(arena, env: anytype /* has get([]const u8) ?[]const u8 */, diag: *std.Io.Writer) Error![]Account` (`error.InvalidConfig` with reason in `diag`); `config.find(accounts, name) ?*Account`.
+- Produces: `config.Account{ name, host: [:0]const u8, port: u16, login: [:0]const u8, password: [:0]u8, readonly: bool, drafts: ?[]const u8 }` with `wipe()`; `config.load(arena, env: anytype /* has get([]const u8) ?[]const u8 */, diag: *std.Io.Writer) Error![]Account` (`error.InvalidConfig` with reason in `diag`); `config.find(accounts, name) ?*Account`; `config.Settings{ cache_dir: ?[]const u8, cache_dir_unavailable: bool, mailbox_ttl: i64 }`; `config.loadSettings(arena, env, diag) Error!Settings`; `config.app_dir`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2117,6 +2144,45 @@ test "rejects missing, malformed, duplicate; never leaks values" {
         .{ "IMAP_A_READONLY", "s3cret" },
     }), "IMAP_A_READONLY must be one of 1/true/yes/0/false/no");
 }
+
+fn settingsFrom(arena: Allocator, e: TestEnv) !Settings {
+    var buf: [256]u8 = undefined;
+    var diag: std.Io.Writer = .fixed(&buf);
+    return loadSettings(arena, e, &diag);
+}
+
+test "settings: XDG cache location, HOME fallback, disable switch, TTL" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const xdg = try settingsFrom(a, testEnv(.{ .{ "XDG_CACHE_HOME", "/x/cache" }, .{ "HOME", "/home/me" } }));
+    try testing.expectEqualStrings("/x/cache/tp-imap-mcp", xdg.cache_dir.?);
+    try testing.expectEqual(3600, xdg.mailbox_ttl);
+
+    // Relative XDG_CACHE_HOME is ignored per the XDG spec.
+    const home = try settingsFrom(a, testEnv(.{ .{ "XDG_CACHE_HOME", "rel" }, .{ "HOME", "/home/me" } }));
+    try testing.expectEqualStrings("/home/me/.cache/tp-imap-mcp", home.cache_dir.?);
+
+    const off = try settingsFrom(a, testEnv(.{ .{ "TP_IMAP_MCP_CACHE", "0" }, .{ "HOME", "/home/me" }, .{ "TP_IMAP_MCP_MAILBOX_TTL", "60" } }));
+    try testing.expect(off.cache_dir == null and !off.cache_dir_unavailable);
+    try testing.expectEqual(60, off.mailbox_ttl);
+
+    const nowhere = try settingsFrom(a, testEnv(.{}));
+    try testing.expect(nowhere.cache_dir == null and nowhere.cache_dir_unavailable);
+
+    try expectInvalidSettings(testEnv(.{.{ "TP_IMAP_MCP_MAILBOX_TTL", "-5" }}), "TP_IMAP_MCP_MAILBOX_TTL must be a number of seconds >= 0");
+    try expectInvalidSettings(testEnv(.{.{ "TP_IMAP_MCP_CACHE", "maybe" }}), "TP_IMAP_MCP_CACHE must be one of 1/true/yes/0/false/no");
+}
+
+fn expectInvalidSettings(e: TestEnv, comptime expected_diag: []const u8) !void {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var buf: [256]u8 = undefined;
+    var diag: std.Io.Writer = .fixed(&buf);
+    try testing.expectError(error.InvalidConfig, loadSettings(arena_state.allocator(), e, &diag));
+    try testing.expectEqualStrings(expected_diag, diag.buffered());
+}
 ```
 
 Add to the `test { ... }` block in `src/main.zig`:
@@ -2135,7 +2201,8 @@ Expected: compile error `use of undeclared identifier 'std'` in `src/config.zig`
 Insert above the tests, at the very top of `src/config.zig`:
 
 ```zig
-//! Account configuration from environment variables (see spec §4).
+//! Configuration from environment variables: accounts (ADR 0007) and cache
+//! settings (ADRs 0013, 0014).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -2192,6 +2259,41 @@ pub fn load(arena: Allocator, env: anytype, diag: *std.Io.Writer) Error![]Accoun
     return accounts.toOwnedSlice(arena);
 }
 
+pub const Settings = struct {
+    /// `$XDG_CACHE_HOME/tp-imap-mcp` or `$HOME/.cache/tp-imap-mcp`; null when
+    /// caching is disabled or no location could be determined.
+    cache_dir: ?[]const u8,
+    /// Set when caching was wanted but no cache location could be determined.
+    cache_dir_unavailable: bool,
+    /// Seconds a cached mailbox list stays fresh.
+    mailbox_ttl: i64,
+};
+
+pub const app_dir = "tp-imap-mcp";
+
+/// Reads TP_IMAP_MCP_CACHE, TP_IMAP_MCP_MAILBOX_TTL, XDG_CACHE_HOME, HOME.
+pub fn loadSettings(arena: Allocator, env: anytype, diag: *std.Io.Writer) Error!Settings {
+    const ttl_key = "TP_IMAP_MCP_MAILBOX_TTL";
+    const ttl: i64 = if (nonEmpty(env, ttl_key)) |v|
+        std.fmt.parseInt(u31, v, 10) catch return fail(diag, "{s} must be a number of seconds >= 0", .{ttl_key})
+    else
+        3600;
+
+    if (!try boolVar(env, diag, "TP_IMAP_MCP_CACHE", true))
+        return .{ .cache_dir = null, .cache_dir_unavailable = false, .mailbox_ttl = ttl };
+
+    const base: ?[]const u8 = blk: {
+        if (nonEmpty(env, "XDG_CACHE_HOME")) |x| if (std.fs.path.isAbsolute(x)) break :blk x;
+        if (nonEmpty(env, "HOME")) |h| break :blk try std.fs.path.join(arena, &.{ h, ".cache" });
+        break :blk null;
+    };
+    return .{
+        .cache_dir = if (base) |b| try std.fs.path.join(arena, &.{ b, app_dir }) else null,
+        .cache_dir_unavailable = base == null,
+        .mailbox_ttl = ttl,
+    };
+}
+
 /// Case-insensitive lookup by configured name.
 pub fn find(accounts: []Account, name: []const u8) ?*Account {
     for (accounts) |*a| if (std.ascii.eqlIgnoreCase(a.name, name)) return a;
@@ -2227,8 +2329,11 @@ fn port(arena: Allocator, env: anytype, diag: *std.Io.Writer, prefix: []const u8
 }
 
 fn flag(arena: Allocator, env: anytype, diag: *std.Io.Writer, prefix: []const u8, suffix: []const u8) Error!bool {
-    const key = try varName(arena, prefix, suffix);
-    const v = nonEmpty(env, key) orelse return false;
+    return boolVar(env, diag, try varName(arena, prefix, suffix), false);
+}
+
+fn boolVar(env: anytype, diag: *std.Io.Writer, key: []const u8, default: bool) Error!bool {
+    const v = nonEmpty(env, key) orelse return default;
     const truthy = [_][]const u8{ "1", "true", "yes" };
     const falsy = [_][]const u8{ "0", "false", "no" };
     for (truthy) |t| if (std.ascii.eqlIgnoreCase(v, t)) return true;
@@ -2240,22 +2345,666 @@ fn flag(arena: Allocator, env: anytype, diag: *std.Io.Writer, prefix: []const u8
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `zig build test --summary all`
-Expected: all tests pass, including 2 in `config.zig`.
+Expected: 35/35 tests pass.
 
 - [ ] **Checkpoint: hand off for commit**
 
 Do not run git (the user performs all git operations). Tell the user the task is
-ready and suggest the message: `feat: multi-account configuration from IMAP_* environment`
+ready and suggest the message: `feat: multi-account configuration and XDG cache settings from the environment`
 
 ---
-### Task 8: Account registry with reconnect
+### Task 8: Local LIST pattern matching
+**Files:**
+- Create: `src/listmatch.zig`
+- Modify: `src/main.zig` (test block)
+
+**Interfaces:**
+- Produces: `listmatch.matches(name: []const u8, reference: []const u8, pattern: []const u8, delimiter: ?u8) bool` (all UTF-8).
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `src/listmatch.zig` containing only the tests:
+
+```zig
+const testing = std.testing;
+
+test "star matches across levels, percent stops at the delimiter" {
+    try testing.expect(matches("Archives/2024/Q1", "", "*", '/'));
+    try testing.expect(matches("Archives/2024/Q1", "Archives/", "*", '/'));
+    try testing.expect(!matches("Archives/2024/Q1", "Archives/", "%", '/'));
+    try testing.expect(matches("Archives/2024", "Archives/", "%", '/'));
+    try testing.expect(matches("Archives", "", "Archives*", '/'));
+    try testing.expect(matches("Archives2", "", "Archives*", '/'));
+    try testing.expect(!matches("Sent", "", "Archives*", '/'));
+    try testing.expect(matches("Queue", "", "Q%", '/'));
+    try testing.expect(!matches("Queue/Sub", "", "Q%", '/'));
+}
+
+test "reference and pattern concatenate without an inserted delimiter" {
+    try testing.expect(matches("INBOX.Foo", "INBOX.", "*", '.'));
+    try testing.expect(matches("INBOXed", "INBOX", "*", '.'));
+    try testing.expect(matches("Archives", "Arch", "ives", '/'));
+}
+
+test "INBOX is case-insensitive, other names are not" {
+    try testing.expect(matches("INBOX", "", "inbox", '/'));
+    try testing.expect(matches("INBOX/Sub", "", "Inbox/%", '/'));
+    try testing.expect(matches("INBOX/Sub", "inbox/", "%", '/'));
+    try testing.expect(!matches("Sent", "", "sent", '/'));
+}
+
+test "empty pattern matches nothing; nil delimiter means flat" {
+    try testing.expect(!matches("INBOX", "", "", '/'));
+    try testing.expect(matches("a/b", "", "%", null));
+}
+```
+
+Add to the `test { ... }` block in `src/main.zig`:
+
+```zig
+    _ = @import("listmatch.zig");
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `zig build test --summary all`
+Expected: compile error `use of undeclared identifier 'std'` in `src/listmatch.zig`.
+
+- [ ] **Step 3: Implement**
+
+Insert above the tests, at the very top of `src/listmatch.zig`:
+
+```zig
+//! Local evaluation of IMAP LIST arguments against a cached mailbox list
+//! (RFC 3501 §6.3.8): the reference and pattern are concatenated; `*` matches
+//! anything, `%` matches anything except the hierarchy delimiter; the name
+//! INBOX is case-insensitive.
+
+const std = @import("std");
+
+/// `name`, `reference`, and `pattern` are all UTF-8.
+pub fn matches(name: []const u8, reference: []const u8, pattern: []const u8, delimiter: ?u8) bool {
+    var nbuf: [5]u8 = undefined;
+    var pbuf: [5]u8 = undefined;
+    const n = canonicalInbox(name, delimiter, &nbuf);
+    // Canonicalize INBOX in the combined pattern only when it starts the reference
+    // or (with an empty reference) the pattern.
+    if (reference.len > 0) {
+        const r = canonicalInbox(reference, delimiter, &pbuf);
+        return glob(.{ .a = r.head, .b = r.tail, .c = pattern }, 0, n, delimiter);
+    }
+    const p = canonicalInbox(pattern, delimiter, &pbuf);
+    return glob(.{ .a = p.head, .b = p.tail, .c = "" }, 0, n, delimiter);
+}
+
+const Split = struct { head: []const u8, tail: []const u8 };
+
+/// Splits off a leading "inbox" (any case, followed by end or delimiter) as
+/// "INBOX"; otherwise head is empty.
+fn canonicalInbox(s: []const u8, delimiter: ?u8, buf: *[5]u8) Split {
+    if (s.len >= 5 and std.ascii.eqlIgnoreCase(s[0..5], "INBOX") and
+        (s.len == 5 or (delimiter != null and s[5] == delimiter.?)))
+    {
+        buf.* = "INBOX".*;
+        return .{ .head = buf, .tail = s[5..] };
+    }
+    return .{ .head = "", .tail = s };
+}
+
+/// A pattern made of three concatenated slices, indexed without allocating.
+const Pat = struct {
+    a: []const u8,
+    b: []const u8,
+    c: []const u8,
+
+    fn len(p: Pat) usize {
+        return p.a.len + p.b.len + p.c.len;
+    }
+
+    fn at(p: Pat, i: usize) u8 {
+        if (i < p.a.len) return p.a[i];
+        if (i < p.a.len + p.b.len) return p.b[i - p.a.len];
+        return p.c[i - p.a.len - p.b.len];
+    }
+};
+
+fn glob(p: Pat, pi: usize, n: Split, delimiter: ?u8) bool {
+    // Treat the canonicalized name as head ++ tail.
+    const name: Pat = .{ .a = n.head, .b = n.tail, .c = "" };
+    return globAt(p, pi, name, 0, delimiter);
+}
+
+fn globAt(p: Pat, pi: usize, n: Pat, ni: usize, delimiter: ?u8) bool {
+    if (pi == p.len()) return ni == n.len();
+    switch (p.at(pi)) {
+        '*' => {
+            var i = ni;
+            while (i <= n.len()) : (i += 1) if (globAt(p, pi + 1, n, i, delimiter)) return true;
+            return false;
+        },
+        '%' => {
+            var i = ni;
+            while (i <= n.len()) : (i += 1) {
+                if (globAt(p, pi + 1, n, i, delimiter)) return true;
+                if (i < n.len() and delimiter != null and n.at(i) == delimiter.?) return false;
+            }
+            return false;
+        },
+        else => |ch| return ni < n.len() and n.at(ni) == ch and globAt(p, pi + 1, n, ni + 1, delimiter),
+    }
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `zig build test --summary all`
+Expected: 39/39 tests pass.
+
+- [ ] **Checkpoint: hand off for commit**
+
+Do not run git (the user performs all git operations). Tell the user the task is
+ready and suggest the message: `feat: local evaluation of IMAP LIST patterns`
+
+---
+### Task 9: SQLite binding
+**Files:**
+- Create: `src/cache/sqlite.zig`
+- Modify: `src/main.zig` (test block)
+
+**Interfaces:**
+- Produces: `sqlite.Error = error{SqliteFailed, SqliteCorrupt}`; `Db.open(path: [:0]const u8) Error!Db` (":memory:" allowed), `close`, `exec(sql: [:0]const u8)`, `prepare(sql) Error!Stmt`; `Stmt.bindText/bindBlob/bindInt` (1-based), `step() Error!bool`, `run()`, `reset()`, `finalize()`, `int/text/blob(col)` (0-based; slices valid until next step).
+- Relies on: `linkSystemLibrary("sqlite3")` already in `build.zig` (Task 1).
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `src/cache/sqlite.zig` containing only the tests:
+
+```zig
+const testing = std.testing;
+
+test "round-trips text, blob, and integers" {
+    var db: Db = try .open(":memory:");
+    defer db.close();
+    try db.exec("CREATE TABLE t (a TEXT, b BLOB, c INTEGER)");
+    const ins = try db.prepare("INSERT INTO t VALUES (?1, ?2, ?3)");
+    defer ins.finalize();
+    try ins.bindText(1, "héllo");
+    try ins.bindBlob(2, "\x00\xff");
+    try ins.bindInt(3, 4294967295);
+    try ins.run();
+
+    const sel = try db.prepare("SELECT a, b, c FROM t");
+    defer sel.finalize();
+    try testing.expect(try sel.step());
+    try testing.expectEqualStrings("héllo", sel.text(0));
+    try testing.expectEqualSlices(u8, "\x00\xff", sel.blob(1));
+    try testing.expectEqual(4294967295, sel.int(2));
+    try testing.expect(!try sel.step());
+}
+
+test "SQL errors surface as SqliteFailed" {
+    var db: Db = try .open(":memory:");
+    defer db.close();
+    try testing.expectError(error.SqliteFailed, db.exec("NOT SQL"));
+    try testing.expectError(error.SqliteFailed, db.prepare("SELECT * FROM missing"));
+}
+```
+
+Add to the `test { ... }` block in `src/main.zig`:
+
+```zig
+    _ = @import("cache/sqlite.zig");
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `zig build test --summary all`
+Expected: compile error `use of undeclared identifier 'std'` in `src/cache/sqlite.zig`.
+
+- [ ] **Step 3: Implement**
+
+Insert above the tests, at the very top of `src/cache/sqlite.zig`:
+
+```zig
+//! Minimal SQLite binding: hand-written externs for the system libsqlite3
+//! (ADR 0015) plus a thin wrapper. Only what the cache needs.
+
+const std = @import("std");
+
+const sqlite3 = opaque {};
+const sqlite3_stmt = opaque {};
+/// SQLITE_STATIC (null): SQLite does not copy bound data, so it must outlive
+/// the statement's next step/reset. Every caller binds, steps, then resets.
+const Destructor = ?*const fn (?*anyopaque) callconv(.c) void;
+
+extern fn sqlite3_open_v2(filename: [*:0]const u8, db: *?*sqlite3, flags: c_int, vfs: ?[*:0]const u8) c_int;
+extern fn sqlite3_close_v2(db: ?*sqlite3) c_int;
+extern fn sqlite3_errmsg(db: *sqlite3) [*:0]const u8;
+extern fn sqlite3_exec(db: *sqlite3, sql: [*:0]const u8, callback: ?*const anyopaque, arg: ?*anyopaque, errmsg: ?*?[*:0]u8) c_int;
+extern fn sqlite3_busy_timeout(db: *sqlite3, ms: c_int) c_int;
+extern fn sqlite3_prepare_v2(db: *sqlite3, sql: [*]const u8, nbyte: c_int, stmt: *?*sqlite3_stmt, tail: ?*?[*]const u8) c_int;
+extern fn sqlite3_bind_text(stmt: *sqlite3_stmt, idx: c_int, text: [*]const u8, n: c_int, destructor: Destructor) c_int;
+extern fn sqlite3_bind_blob(stmt: *sqlite3_stmt, idx: c_int, data: ?*const anyopaque, n: c_int, destructor: Destructor) c_int;
+extern fn sqlite3_bind_int64(stmt: *sqlite3_stmt, idx: c_int, value: i64) c_int;
+extern fn sqlite3_step(stmt: *sqlite3_stmt) c_int;
+extern fn sqlite3_reset(stmt: *sqlite3_stmt) c_int;
+extern fn sqlite3_finalize(stmt: ?*sqlite3_stmt) c_int;
+extern fn sqlite3_column_int64(stmt: *sqlite3_stmt, col: c_int) i64;
+extern fn sqlite3_column_text(stmt: *sqlite3_stmt, col: c_int) ?[*]const u8;
+extern fn sqlite3_column_blob(stmt: *sqlite3_stmt, col: c_int) ?[*]const u8;
+extern fn sqlite3_column_bytes(stmt: *sqlite3_stmt, col: c_int) c_int;
+
+const SQLITE_OK = 0;
+const SQLITE_CORRUPT = 11;
+const SQLITE_NOTADB = 26;
+const SQLITE_ROW = 100;
+const SQLITE_DONE = 101;
+const SQLITE_OPEN_READWRITE = 0x00000002;
+const SQLITE_OPEN_CREATE = 0x00000004;
+
+pub const Error = error{
+    SqliteFailed,
+    /// The file exists but is not a usable database; safe to delete (cache).
+    SqliteCorrupt,
+};
+
+fn check(db: *sqlite3, rc: c_int) Error!void {
+    if (rc == SQLITE_OK) return;
+    std.log.debug("sqlite: {s}", .{sqlite3_errmsg(db)});
+    return if (rc == SQLITE_CORRUPT or rc == SQLITE_NOTADB) error.SqliteCorrupt else error.SqliteFailed;
+}
+
+fn len(n: usize) c_int {
+    return std.math.cast(c_int, n) orelse std.math.maxInt(c_int);
+}
+
+pub const Db = struct {
+    handle: *sqlite3,
+
+    pub fn open(path: [:0]const u8) Error!Db {
+        var h: ?*sqlite3 = null;
+        const rc = sqlite3_open_v2(path, &h, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, null);
+        const handle = h orelse return error.SqliteFailed;
+        errdefer _ = sqlite3_close_v2(handle);
+        try check(handle, rc);
+        _ = sqlite3_busy_timeout(handle, 5000);
+        return .{ .handle = handle };
+    }
+
+    pub fn close(self: *Db) void {
+        _ = sqlite3_close_v2(self.handle);
+        self.* = undefined;
+    }
+
+    pub fn exec(self: Db, sql: [:0]const u8) Error!void {
+        try check(self.handle, sqlite3_exec(self.handle, sql, null, null, null));
+    }
+
+    pub fn prepare(self: Db, sql: []const u8) Error!Stmt {
+        var s: ?*sqlite3_stmt = null;
+        try check(self.handle, sqlite3_prepare_v2(self.handle, sql.ptr, len(sql.len), &s, null));
+        return .{ .handle = s orelse return error.SqliteFailed, .db = self.handle };
+    }
+};
+
+pub const Stmt = struct {
+    handle: *sqlite3_stmt,
+    db: *sqlite3,
+
+    pub fn finalize(self: Stmt) void {
+        _ = sqlite3_finalize(self.handle);
+    }
+
+    /// Parameters are 1-based, as in SQL (`?1`, `?2`, ...).
+    pub fn bindText(self: Stmt, idx: c_int, value: []const u8) Error!void {
+        try check(self.db, sqlite3_bind_text(self.handle, idx, value.ptr, len(value.len), null));
+    }
+
+    pub fn bindBlob(self: Stmt, idx: c_int, data: []const u8) Error!void {
+        try check(self.db, sqlite3_bind_blob(self.handle, idx, data.ptr, len(data.len), null));
+    }
+
+    pub fn bindInt(self: Stmt, idx: c_int, value: i64) Error!void {
+        try check(self.db, sqlite3_bind_int64(self.handle, idx, value));
+    }
+
+    /// True when a row is available, false when the statement is done.
+    pub fn step(self: Stmt) Error!bool {
+        const rc = sqlite3_step(self.handle);
+        if (rc == SQLITE_ROW) return true;
+        if (rc == SQLITE_DONE) return false;
+        try check(self.db, rc);
+        return error.SqliteFailed;
+    }
+
+    /// Steps a statement that returns no rows.
+    pub fn run(self: Stmt) Error!void {
+        while (try self.step()) {}
+        try self.reset();
+    }
+
+    pub fn reset(self: Stmt) Error!void {
+        try check(self.db, sqlite3_reset(self.handle));
+    }
+
+    /// Columns are 0-based.
+    pub fn int(self: Stmt, col: c_int) i64 {
+        return sqlite3_column_int64(self.handle, col);
+    }
+
+    /// Valid until the next step/reset/finalize; copy if kept.
+    pub fn text(self: Stmt, col: c_int) []const u8 {
+        const p = sqlite3_column_text(self.handle, col) orelse return "";
+        return p[0..@intCast(sqlite3_column_bytes(self.handle, col))];
+    }
+
+    /// Valid until the next step/reset/finalize; copy if kept.
+    pub fn blob(self: Stmt, col: c_int) []const u8 {
+        const p = sqlite3_column_blob(self.handle, col) orelse return "";
+        return p[0..@intCast(sqlite3_column_bytes(self.handle, col))];
+    }
+};
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `zig build test --summary all`
+Expected: 41/41 tests pass.
+
+- [ ] **Checkpoint: hand off for commit**
+
+Do not run git (the user performs all git operations). Tell the user the task is
+ready and suggest the message: `feat: minimal SQLite binding over system libsqlite3`
+
+---
+### Task 10: Cache store
+**Files:**
+- Create: `src/cache/store.zig`
+- Modify: `src/main.zig` (test block)
+
+**Interfaces:**
+- Consumes: `sqlite.Db` (Task 9), `imap.Mailbox`, `imap.Fetched` (Task 1).
+- Produces: `store.Error = sqlite.Error || Allocator.Error`; `Store.open(path) Error!Store` (rebuilds on schema mismatch; `error.SqliteCorrupt` for non-databases), `close`, `mailboxesFresh(ttl_sec: i64) Error!bool`, `loadMailboxes(arena) Error![]imap.Mailbox`, `replaceMailboxes(arena, boxes) Error!void`, `markMailboxesStale()`, `syncUidvalidity(mailbox, uidvalidity: u32)`, `getMessages(arena, mailbox, uidvalidity, uids) Error![]imap.Fetched`, `putMessages(mailbox, uidvalidity, items)`, `clear()`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `src/cache/store.zig` containing only the tests:
+
+```zig
+const testing = std.testing;
+
+fn box(name: []const u8, flags: []const []const u8) imap.Mailbox {
+    return .{ .name = name, .delimiter = '/', .flags = flags };
+}
+
+test "mailbox list round-trip, freshness, and staleness" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var s: Store = try .open(":memory:");
+    defer s.close();
+
+    try testing.expect(!try s.mailboxesFresh(3600));
+    try s.replaceMailboxes(a, &.{ box("INBOX", &.{"\\HasChildren"}), box("Drafts", &.{ "\\Drafts", "\\HasNoChildren" }) });
+    try testing.expect(try s.mailboxesFresh(3600));
+    try testing.expect(!try s.mailboxesFresh(0));
+
+    const got = try s.loadMailboxes(a);
+    try testing.expectEqual(2, got.len);
+    try testing.expectEqualStrings("Drafts", got[0].name);
+    try testing.expectEqual('/', got[0].delimiter.?);
+    try testing.expectEqualStrings("\\HasNoChildren", got[0].flags[1]);
+
+    try s.markMailboxesStale();
+    try testing.expect(!try s.mailboxesFresh(3600));
+}
+
+test "messages: hit, miss, UIDVALIDITY change, vanished mailbox, clear" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var s: Store = try .open(":memory:");
+    defer s.close();
+    try s.replaceMailboxes(a, &.{ box("INBOX", &.{}), box("Old", &.{}) });
+
+    try s.putMessages("INBOX", 7, &.{
+        .{ .uid = 1, .size = 100, .data = "Subject: a\r\n\r\n", .flags = null },
+        .{ .uid = 2, .size = 200, .data = null, .flags = null }, // no header: skipped
+    });
+    try s.putMessages("Old", 1, &.{.{ .uid = 9, .size = 9, .data = "X: y\r\n\r\n", .flags = null }});
+
+    const hit = try s.getMessages(a, "INBOX", 7, &.{ 2, 1, 3 });
+    try testing.expectEqual(1, hit.len);
+    try testing.expectEqual(1, hit[0].uid);
+    try testing.expectEqual(100, hit[0].size);
+    try testing.expectEqualStrings("Subject: a\r\n\r\n", hit[0].data.?);
+
+    try s.syncUidvalidity("INBOX", 8);
+    try testing.expectEqual(0, (try s.getMessages(a, "INBOX", 7, &.{1})).len);
+
+    try s.replaceMailboxes(a, &.{box("INBOX", &.{})}); // "Old" vanished
+    try testing.expectEqual(0, (try s.getMessages(a, "Old", 1, &.{9})).len);
+
+    try s.putMessages("INBOX", 8, &.{.{ .uid = 1, .size = 1, .data = "A: b\r\n\r\n", .flags = null }});
+    try s.clear();
+    try testing.expectEqual(0, (try s.getMessages(a, "INBOX", 8, &.{1})).len);
+    try testing.expectEqual(0, (try s.loadMailboxes(a)).len);
+}
+
+test "schema version mismatch rebuilds the file" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try testing.allocator.printSentinel(".zig-cache/tmp/{s}/c.sqlite3", .{&tmp.sub_path}, 0);
+    defer testing.allocator.free(path);
+    {
+        var db: sqlite.Db = try .open(path);
+        defer db.close();
+        try db.exec("CREATE TABLE junk (x); PRAGMA user_version = 99;");
+    }
+    var s: Store = try .open(path);
+    defer s.close();
+    try testing.expect(!try s.mailboxesFresh(3600));
+}
+
+test "a non-database file reports SqliteCorrupt" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "bad.sqlite3", .data = "this is not a database, just text padding" });
+    const path = try testing.allocator.printSentinel(".zig-cache/tmp/{s}/bad.sqlite3", .{&tmp.sub_path}, 0);
+    defer testing.allocator.free(path);
+    try testing.expectError(error.SqliteCorrupt, Store.open(path));
+}
+```
+
+Add to the `test { ... }` block in `src/main.zig`:
+
+```zig
+    _ = @import("cache/store.zig");
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `zig build test --summary all`
+Expected: compile error `use of undeclared identifier 'std'` in `src/cache/store.zig`.
+
+- [ ] **Step 3: Implement**
+
+Insert above the tests, at the very top of `src/cache/store.zig`:
+
+```zig
+//! Per-account on-disk cache (ADR 0013): mailbox list plus message headers
+//! and sizes keyed by (mailbox, UIDVALIDITY, UID). Mailbox names are stored in
+//! wire form (modified UTF-7).
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const sqlite = @import("sqlite.zig");
+const imap = @import("../imap/session.zig");
+
+pub const Error = sqlite.Error || Allocator.Error;
+
+const schema_version = 1;
+
+const schema =
+    \\PRAGMA journal_mode = WAL;
+    \\DROP TABLE IF EXISTS meta;
+    \\DROP TABLE IF EXISTS mailboxes;
+    \\DROP TABLE IF EXISTS messages;
+    \\CREATE TABLE meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+    \\CREATE TABLE mailboxes (name TEXT PRIMARY KEY, delimiter TEXT NOT NULL, flags TEXT NOT NULL);
+    \\CREATE TABLE messages (
+    \\  mailbox TEXT NOT NULL, uidvalidity INTEGER NOT NULL, uid INTEGER NOT NULL,
+    \\  size INTEGER NOT NULL, header BLOB NOT NULL,
+    \\  PRIMARY KEY (mailbox, uidvalidity, uid)
+    \\) WITHOUT ROWID;
+    \\PRAGMA user_version = 1;
+;
+
+const now_sql = "CAST(strftime('%s','now') AS INTEGER)";
+
+pub const Store = struct {
+    db: sqlite.Db,
+
+    /// Opens or creates the cache at `path` (":memory:" in tests). A file with
+    /// a different schema version is rebuilt; it is only a cache.
+    pub fn open(path: [:0]const u8) Error!Store {
+        var db: sqlite.Db = try .open(path);
+        errdefer db.close();
+        const v = try db.prepare("PRAGMA user_version");
+        defer v.finalize();
+        const version = if (try v.step()) v.int(0) else 0;
+        try v.reset();
+        if (version != schema_version) try db.exec(schema);
+        return .{ .db = db };
+    }
+
+    pub fn close(self: *Store) void {
+        self.db.close();
+        self.* = undefined;
+    }
+
+    /// True if the mailbox list was stored less than `ttl_sec` seconds ago.
+    pub fn mailboxesFresh(self: *Store, ttl_sec: i64) Error!bool {
+        const q = try self.db.prepare("SELECT 1 FROM meta WHERE key = 'mailboxes_fetched_at' AND value > " ++ now_sql ++ " - ?1");
+        defer q.finalize();
+        try q.bindInt(1, ttl_sec);
+        return q.step();
+    }
+
+    pub fn loadMailboxes(self: *Store, arena: Allocator) Error![]imap.Mailbox {
+        const q = try self.db.prepare("SELECT name, delimiter, flags FROM mailboxes ORDER BY name");
+        defer q.finalize();
+        var out: std.ArrayList(imap.Mailbox) = .empty;
+        while (try q.step()) {
+            const delim = q.text(1);
+            var flags: std.ArrayList([]const u8) = .empty;
+            var it = std.mem.tokenizeScalar(u8, q.text(2), ' ');
+            while (it.next()) |f| try flags.append(arena, try arena.dupe(u8, f));
+            try out.append(arena, .{
+                .name = try arena.dupe(u8, q.text(0)),
+                .delimiter = if (delim.len == 1) delim[0] else null,
+                .flags = flags.items,
+            });
+        }
+        return out.items;
+    }
+
+    /// Replaces the stored list, drops cached messages of mailboxes that no
+    /// longer exist, and marks the list fresh — all in one transaction.
+    pub fn replaceMailboxes(self: *Store, arena: Allocator, boxes: []const imap.Mailbox) Error!void {
+        try self.db.exec("BEGIN IMMEDIATE");
+        errdefer self.db.exec("ROLLBACK") catch {};
+        try self.db.exec("DELETE FROM mailboxes");
+        const ins = try self.db.prepare("INSERT OR REPLACE INTO mailboxes (name, delimiter, flags) VALUES (?1, ?2, ?3)");
+        defer ins.finalize();
+        for (boxes) |b| {
+            try ins.bindText(1, b.name);
+            try ins.bindText(2, if (b.delimiter) |*d| d[0..1] else "");
+            try ins.bindText(3, try std.mem.join(arena, " ", b.flags));
+            try ins.run();
+        }
+        try self.db.exec("DELETE FROM messages WHERE mailbox NOT IN (SELECT name FROM mailboxes)");
+        try self.db.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('mailboxes_fetched_at', " ++ now_sql ++ ")");
+        try self.db.exec("COMMIT");
+    }
+
+    /// Forces the next mailbox-list read to go to the server.
+    pub fn markMailboxesStale(self: *Store) Error!void {
+        try self.db.exec("DELETE FROM meta WHERE key = 'mailboxes_fetched_at'");
+    }
+
+    /// Drops cached messages of `mailbox` whose UIDVALIDITY differs from `uidvalidity`.
+    pub fn syncUidvalidity(self: *Store, mailbox: []const u8, uidvalidity: u32) Error!void {
+        const q = try self.db.prepare("DELETE FROM messages WHERE mailbox = ?1 AND uidvalidity <> ?2");
+        defer q.finalize();
+        try q.bindText(1, mailbox);
+        try q.bindInt(2, uidvalidity);
+        try q.run();
+    }
+
+    /// Cached rows for `uids` (missing UIDs are simply absent).
+    pub fn getMessages(self: *Store, arena: Allocator, mailbox: []const u8, uidvalidity: u32, uids: []const u32) Error![]imap.Fetched {
+        const q = try self.db.prepare("SELECT size, header FROM messages WHERE mailbox = ?1 AND uidvalidity = ?2 AND uid = ?3");
+        defer q.finalize();
+        var out: std.ArrayList(imap.Fetched) = .empty;
+        for (uids) |uid| {
+            try q.bindText(1, mailbox);
+            try q.bindInt(2, uidvalidity);
+            try q.bindInt(3, uid);
+            if (try q.step()) try out.append(arena, .{
+                .uid = uid,
+                .size = @intCast(q.int(0)),
+                .data = try arena.dupe(u8, q.blob(1)),
+                .flags = null,
+            });
+            try q.reset();
+        }
+        return out.items;
+    }
+
+    /// Stores header + size rows; items without header data are skipped.
+    pub fn putMessages(self: *Store, mailbox: []const u8, uidvalidity: u32, items: []const imap.Fetched) Error!void {
+        try self.db.exec("BEGIN IMMEDIATE");
+        errdefer self.db.exec("ROLLBACK") catch {};
+        const ins = try self.db.prepare("INSERT OR REPLACE INTO messages (mailbox, uidvalidity, uid, size, header) VALUES (?1, ?2, ?3, ?4, ?5)");
+        defer ins.finalize();
+        for (items) |item| {
+            const header = item.data orelse continue;
+            try ins.bindText(1, mailbox);
+            try ins.bindInt(2, uidvalidity);
+            try ins.bindInt(3, item.uid);
+            try ins.bindInt(4, item.size);
+            try ins.bindBlob(5, header);
+            try ins.run();
+        }
+        try self.db.exec("COMMIT");
+    }
+
+    pub fn clear(self: *Store) Error!void {
+        try self.db.exec("BEGIN IMMEDIATE; DELETE FROM messages; DELETE FROM mailboxes; DELETE FROM meta; COMMIT;");
+    }
+};
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `zig build test --summary all`
+Expected: 45/45 tests pass.
+
+- [ ] **Checkpoint: hand off for commit**
+
+Do not run git (the user performs all git operations). Tell the user the task is
+ready and suggest the message: `feat: SQLite cache for mailbox list and message headers/sizes`
+
+---
+### Task 11: Account registry with reconnect and cache
 **Files:**
 - Create: `src/accounts.zig`
 - Modify: `src/main.zig` (test block)
 
 **Interfaces:**
-- Consumes: `config.Account` (Task 7), `imap.Session` (Task 1), `mutf7.encode` (Task 4).
-- Produces: `accounts.Error = imap.Error || error{LoginFailed}`; `Registry.init(gpa, []config.Account) !Registry`; `deinit()` (logs out, wipes passwords); `find(name) ?usize` (case-insensitive); `run(idx, op: anytype) Error!void` where `op` is a pointer to a struct with `pub fn run(self, *Session) accounts.Error!void`; `diag() []const u8` (cause of the last failure); `drafts(idx, arena) Error![:0]const u8`; field `slots[idx].session: ?Session` (used by itest).
+- Consumes: `config.Account`, `config.Settings` (Task 7), `imap.Session` (Task 1), `mutf7.encode` (Task 4), `Store` (Task 10).
+- Produces: `accounts.Error = imap.Error || error{LoginFailed}`; `Registry.init(gpa, []config.Account, config.Settings) !Registry`; `deinit()` (logs out, closes caches, wipes passwords); `find(name) ?usize` (case-insensitive); `run(idx, op: anytype) Error!void` where `op` is a pointer to a struct with `pub fn run(self, *Session) accounts.Error!void`; `diag() []const u8`; `cache(idx) ?*Store`; `cacheFailed(idx, anyerror)`; `clearCache(idx) bool`; `mailboxList(idx, arena, refresh: bool) Error![]imap.Mailbox`; `drafts(idx, arena) Error![:0]const u8`; field `slots[idx].session: ?Session` (used by itest).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2268,18 +3017,25 @@ const Noop = struct {
     pub fn run(_: *Noop, _: *Session) Error!void {}
 };
 
-test "unreachable server reports a connect diagnostic without the password" {
-    var accounts = [_]config.Account{.{
+const no_cache: config.Settings = .{ .cache_dir = null, .cache_dir_unavailable = false, .mailbox_ttl = 3600 };
+
+fn localAccount(password: [:0]u8, drafts_name: ?[]const u8) config.Account {
+    return .{
         .name = "local",
         .host = "127.0.0.1",
         .port = 1, // nothing listens here
         .login = "me",
-        .password = @constCast(try testing.allocator.dupeSentinel(u8, "s3cret", 0)),
+        .password = password,
         .readonly = false,
-        .drafts = null,
-    }};
-    defer testing.allocator.free(accounts[0].password);
-    var reg: Registry = try .init(testing.allocator, &accounts);
+        .drafts = drafts_name,
+    };
+}
+
+test "unreachable server reports a connect diagnostic without the password" {
+    const pw = try testing.allocator.dupeSentinel(u8, "s3cret", 0);
+    defer testing.allocator.free(pw);
+    var accounts = [_]config.Account{localAccount(pw, null)};
+    var reg: Registry = try .init(testing.allocator, &accounts, no_cache);
     defer reg.deinit();
 
     try testing.expectEqual(0, reg.find("LOCAL").?);
@@ -2292,21 +3048,73 @@ test "unreachable server reports a connect diagnostic without the password" {
 }
 
 test "configured drafts override is encoded without contacting the server" {
-    var accounts = [_]config.Account{.{
-        .name = "local",
-        .host = "127.0.0.1",
-        .port = 1,
-        .login = "me",
-        .password = @constCast(try testing.allocator.dupeSentinel(u8, "x", 0)),
-        .readonly = false,
-        .drafts = "Entwürfe",
-    }};
-    defer testing.allocator.free(accounts[0].password);
-    var reg: Registry = try .init(testing.allocator, &accounts);
+    const pw = try testing.allocator.dupeSentinel(u8, "x", 0);
+    defer testing.allocator.free(pw);
+    var accounts = [_]config.Account{localAccount(pw, "Entwürfe")};
+    var reg: Registry = try .init(testing.allocator, &accounts, no_cache);
     defer reg.deinit();
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     try testing.expectEqualStrings("Entw&APw-rfe", try reg.drafts(0, arena_state.allocator()));
+}
+
+test "fresh cached mailbox list is served without the server; clearCache empties it" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try testing.allocator.print(".zig-cache/tmp/{s}/nested/cache", .{&tmp.sub_path});
+    defer testing.allocator.free(dir);
+
+    const pw = try testing.allocator.dupeSentinel(u8, "x", 0);
+    defer testing.allocator.free(pw);
+    var accounts = [_]config.Account{localAccount(pw, null)};
+    var reg: Registry = try .init(testing.allocator, &accounts, .{ .cache_dir = dir, .cache_dir_unavailable = false, .mailbox_ttl = 3600 });
+    defer reg.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // Seed the cache as if a LIST had happened.
+    const store = reg.cache(0).?;
+    try store.replaceMailboxes(a, &.{.{ .name = "Brouillons", .delimiter = '/', .flags = &.{"\\Drafts"} }});
+
+    // Served from cache: the server (127.0.0.1:1) is never contacted.
+    const boxes = try reg.mailboxList(0, a, false);
+    try testing.expectEqualStrings("Brouillons", boxes[0].name);
+    try testing.expectEqualStrings("Brouillons", try reg.drafts(0, a));
+
+    // refresh forces the server, which is unreachable here.
+    try testing.expectError(error.ConnectFailed, reg.mailboxList(0, a, true));
+
+    try testing.expect(reg.clearCache(0));
+    try testing.expectError(error.ConnectFailed, reg.mailboxList(0, a, false));
+}
+
+test "corrupt cache file is rebuilt" {
+    // The rebuild logs a warning by design; keep test output clean.
+    testing.log_level = .err;
+    defer testing.log_level = .warn;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "local.sqlite3", .data = "not a database, just some text" });
+    const dir = try testing.allocator.print(".zig-cache/tmp/{s}", .{&tmp.sub_path});
+    defer testing.allocator.free(dir);
+
+    const pw = try testing.allocator.dupeSentinel(u8, "x", 0);
+    defer testing.allocator.free(pw);
+    var accounts = [_]config.Account{localAccount(pw, null)};
+    var reg: Registry = try .init(testing.allocator, &accounts, .{ .cache_dir = dir, .cache_dir_unavailable = false, .mailbox_ttl = 3600 });
+    defer reg.deinit();
+    try testing.expect(reg.cache(0) != null);
+}
+
+test "caching disabled: no store, clearCache reports false" {
+    const pw = try testing.allocator.dupeSentinel(u8, "x", 0);
+    defer testing.allocator.free(pw);
+    var accounts = [_]config.Account{localAccount(pw, null)};
+    var reg: Registry = try .init(testing.allocator, &accounts, no_cache);
+    defer reg.deinit();
+    try testing.expect(reg.cache(0) == null);
+    try testing.expect(!reg.clearCache(0));
 }
 ```
 
@@ -2327,42 +3135,54 @@ Insert above the tests, at the very top of `src/accounts.zig`:
 
 ```zig
 //! Account registry: lazily connected sessions, health check, one
-//! reconnect-and-retry, drafts-folder discovery (spec §5).
+//! reconnect-and-retry, per-account cache, mailbox list, drafts discovery
+//! (spec §5; ADRs 0006, 0013).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const config = @import("config.zig");
 const imap = @import("imap/session.zig");
 const mutf7 = @import("imap/mutf7.zig");
+const Store = @import("cache/store.zig").Store;
 
 pub const Session = imap.Session;
 pub const Error = imap.Error || error{LoginFailed};
 
 pub const timeout_sec: c_long = 60;
 
+const log = std.log.scoped(.accounts);
+
 pub const Registry = struct {
     gpa: Allocator,
     accounts: []config.Account,
+    settings: config.Settings,
     slots: []Slot,
     /// Human-readable cause of the most recent failure (no secrets).
     diag_buf: [512]u8 = undefined,
     diag_len: usize = 0,
 
+    const CacheState = union(enum) { unopened, open: Store, disabled };
+
     const Slot = struct {
         session: ?Session = null,
         drafts: ?[:0]u8 = null, // wire-encoded, owned by gpa
+        cache: CacheState = .unopened,
     };
 
-    pub fn init(gpa: Allocator, accounts: []config.Account) Allocator.Error!Registry {
+    pub fn init(gpa: Allocator, accounts: []config.Account, settings: config.Settings) Allocator.Error!Registry {
         const slots = try gpa.alloc(Slot, accounts.len);
         @memset(slots, .{});
-        return .{ .gpa = gpa, .accounts = accounts, .slots = slots };
+        return .{ .gpa = gpa, .accounts = accounts, .settings = settings, .slots = slots };
     }
 
     pub fn deinit(self: *Registry) void {
         for (self.slots, self.accounts) |*slot, *account| {
             if (slot.session) |*s| s.close();
             if (slot.drafts) |d| self.gpa.free(d);
+            switch (slot.cache) {
+                .open => |*store| store.close(),
+                else => {},
+            }
             account.wipe();
         }
         self.gpa.free(self.slots);
@@ -2405,6 +3225,8 @@ pub const Registry = struct {
                 },
                 error.ServerRejected => {
                     self.setDiag("IMAP server rejected the command: {s}", .{s.lastResponse()});
+                    // The mailbox may have been renamed or deleted elsewhere.
+                    if (self.cache(idx)) |store| store.markMailboxesStale() catch |e| self.cacheFailed(idx, e);
                     return err;
                 },
                 error.ProtocolError => {
@@ -2446,8 +3268,72 @@ pub const Registry = struct {
         self.slots[idx].session = null;
     }
 
+    // ---- cache ------------------------------------------------------------
+
+    /// The account's cache, opened on first use; null when caching is
+    /// disabled or the cache failed. Never fails a tool call.
+    pub fn cache(self: *Registry, idx: usize) ?*Store {
+        const slot = &self.slots[idx];
+        switch (slot.cache) {
+            .open => |*store| return store,
+            .disabled => return null,
+            .unopened => {},
+        }
+        slot.cache = .disabled;
+        const dir = self.settings.cache_dir orelse return null;
+        const store = openCache(self.gpa, dir, self.accounts[idx].name) catch |err| {
+            log.warn("account \"{s}\": cache unavailable ({t}); continuing without it", .{ self.accounts[idx].name, err });
+            return null;
+        };
+        slot.cache = .{ .open = store };
+        return &slot.cache.open;
+    }
+
+    /// Logs a cache failure once and stops using that account's cache.
+    pub fn cacheFailed(self: *Registry, idx: usize, err: anyerror) void {
+        const slot = &self.slots[idx];
+        log.warn("account \"{s}\": cache error ({t}); continuing without it", .{ self.accounts[idx].name, err });
+        switch (slot.cache) {
+            .open => |*store| store.close(),
+            else => {},
+        }
+        slot.cache = .disabled;
+    }
+
+    /// Deletes all cached rows for the account. False if caching is off.
+    pub fn clearCache(self: *Registry, idx: usize) bool {
+        const store = self.cache(idx) orelse return false;
+        store.clear() catch |err| {
+            self.cacheFailed(idx, err);
+            return false;
+        };
+        return true;
+    }
+
+    /// Every mailbox on the account (`LIST "" "*"`), from the cache when it is
+    /// fresh and `refresh` is false. Names are in wire form.
+    pub fn mailboxList(self: *Registry, idx: usize, arena: Allocator, refresh: bool) Error![]imap.Mailbox {
+        if (!refresh) if (self.cache(idx)) |store| {
+            const cached: ?[]imap.Mailbox = blk: {
+                const fresh = store.mailboxesFresh(self.settings.mailbox_ttl) catch |e| break :blk self.cacheMiss(idx, e);
+                if (!fresh) break :blk null;
+                break :blk store.loadMailboxes(arena) catch |e| self.cacheMiss(idx, e);
+            };
+            if (cached) |boxes| return boxes;
+        };
+        var op: ListAll = .{ .arena = arena };
+        try self.run(idx, &op);
+        if (self.cache(idx)) |store| store.replaceMailboxes(arena, op.result) catch |e| self.cacheFailed(idx, e);
+        return op.result;
+    }
+
+    fn cacheMiss(self: *Registry, idx: usize, err: anyerror) ?[]imap.Mailbox {
+        self.cacheFailed(idx, err);
+        return null;
+    }
+
     /// Wire-encoded drafts mailbox: IMAP_<NAME>_DRAFTS, else the \Drafts
-    /// special-use mailbox, else "Drafts". Cached per account.
+    /// special-use mailbox, else "Drafts". Cached per process.
     pub fn drafts(self: *Registry, idx: usize, arena: Allocator) Error![:0]const u8 {
         const slot = &self.slots[idx];
         if (slot.drafts) |d| return d;
@@ -2457,51 +3343,92 @@ pub const Registry = struct {
                 error.OutOfMemory => return error.OutOfMemory,
             }
         else blk: {
-            var finder: DraftsFinder = .{ .arena = arena };
-            try self.run(idx, &finder);
-            break :blk finder.found orelse "Drafts";
+            for (try self.mailboxList(idx, arena, false)) |b| for (b.flags) |f| {
+                if (std.ascii.eqlIgnoreCase(f, "\\Drafts")) break :blk b.name;
+            };
+            break :blk "Drafts";
         };
         slot.drafts = try self.gpa.dupeSentinel(u8, name, 0);
         return slot.drafts.?;
     }
 };
 
-const DraftsFinder = struct {
+const ListAll = struct {
     arena: Allocator,
-    found: ?[]const u8 = null,
+    result: []imap.Mailbox = &.{},
 
-    pub fn run(self: *DraftsFinder, s: *Session) Error!void {
-        const boxes = try s.list(self.arena, "", "*");
-        for (boxes) |b| for (b.flags) |f| if (std.ascii.eqlIgnoreCase(f, "\\Drafts")) {
-            self.found = b.name;
-            return;
-        };
+    pub fn run(self: *ListAll, s: *Session) Error!void {
+        self.result = try s.list(self.arena, "", "*");
     }
 };
+
+/// Creates `dir` (mode 0700) and opens `<dir>/<account>.sqlite3` with a
+/// 0077 umask so the database and its WAL files are private. A corrupt file is
+/// deleted and recreated once.
+fn openCache(gpa: Allocator, dir: []const u8, account: []const u8) !Store {
+    try makePath(gpa, dir);
+    const lower = try std.ascii.allocLowerString(gpa, account);
+    defer gpa.free(lower);
+    const path = try gpa.printSentinel("{s}/{s}.sqlite3", .{ dir, lower }, 0);
+    defer gpa.free(path);
+
+    const old_mask = std.c.umask(0o077);
+    defer _ = std.c.umask(old_mask);
+    return Store.open(path) catch |err| switch (err) {
+        error.SqliteCorrupt => {
+            log.warn("cache file {s} is corrupt; rebuilding", .{path});
+            _ = std.c.unlink(path);
+            return Store.open(path);
+        },
+        else => return err,
+    };
+}
+
+/// mkdir -p with mode 0700 for any component it creates.
+fn makePath(gpa: Allocator, dir: []const u8) !void {
+    const z = try gpa.dupeSentinel(u8, dir, 0);
+    defer gpa.free(z);
+    var i: usize = 1;
+    while (i <= z.len) : (i += 1) {
+        if (i < z.len and z[i] != '/') continue;
+        const saved = z[i];
+        z[i] = 0;
+        defer z[i] = saved;
+        if (std.c.mkdir(z[0..i :0], 0o700) != 0) {
+            switch (std.c.errno(-1)) {
+                .EXIST => {},
+                else => |e| {
+                    log.warn("cannot create {s}: {t}", .{ z[0..i], e });
+                    return error.CacheDirUnavailable;
+                },
+            }
+        }
+    }
+}
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `zig build test --summary all`
-Expected: all tests pass, including 2 in `accounts.zig` (one connects to 127.0.0.1:1 and expects refusal).
+Expected: 50/50 tests pass (one test connects to 127.0.0.1:1 and expects refusal; the corrupt-cache test silences its expected warning).
 
 - [ ] **Checkpoint: hand off for commit**
 
 Do not run git (the user performs all git operations). Tell the user the task is
-ready and suggest the message: `feat: account registry with lazy connect and one reconnect-and-retry`
+ready and suggest the message: `feat: account registry with reconnect, per-account cache, mailbox list`
 
 ---
-### Task 9: Tool descriptions, schemas, and handlers
+### Task 12: Tool descriptions, schemas, and handlers
 
 **Files:**
 - Create: `src/descriptions.zig`, `src/tools.zig`
 - Modify: `src/main.zig` (test block)
 
 **Interfaces:**
-- Consumes: everything from Tasks 1–8.
+- Consumes: everything from Tasks 1–11.
 - Produces: `tools.Outcome = union(enum){ content: []const u8, tool_error: []const u8, invalid_params: []const u8 }`;
   `tools.call(registry: *Registry, arena, name, args: ?std.json.ObjectMap) Allocator.Error!?Outcome` (null = unknown tool);
-  `tools.writeList(jw: *std.json.Stringify) Stringify.Error!void`; `tools.tools` (13 entries, `search` at index 4);
+  `tools.writeList(jw: *std.json.Stringify) Stringify.Error!void`; `tools.tools` (14 entries, `search` at index 4, `clear_cache` last);
   `tools.alignToUids(arena, uids, fetched) ![]?*const Fetched`.
 
 - [ ] **Step 1: Write the descriptions** (data only, no tests)
@@ -2561,6 +3488,9 @@ pub const list_mailboxes =
     \\Notes:
     \\    - Paths in results are absolute from the root (so use INBOX/...).
     \\    - The delimiter varies by server ("/" or ".").
+    \\    - Results come from a cached mailbox list (refreshed hourly by
+    \\      default). Pass refresh=true if a folder was just created, renamed,
+    \\      or deleted in another mail client.
 ;
 
 pub const mailboxes_status =
@@ -2740,6 +3670,15 @@ pub const create_message =
     \\    If the message is a reply to another one, its "In-Reply-To" header
     \\    must contain the "Message-ID" of the original message.
 ;
+
+pub const clear_cache =
+    \\Deletes this account's local cache (mailbox list, message headers and
+    \\sizes). Use when the user asks to clear cached data or results look
+    \\stale. Nothing on the IMAP server is changed.
+    \\
+    \\Return:
+    \\    {"status": "OK"} (with a "note" when caching is disabled)
+;
 ```
 
 - [ ] **Step 2: Write the failing tests**
@@ -2765,7 +3704,7 @@ test "alignToUids follows input order, repeats duplicates, nulls missing" {
 }
 
 fn testRegistry(accts: []config.Account) !Registry {
-    return Registry.init(testing.allocator, accts);
+    return Registry.init(testing.allocator, accts, .{ .cache_dir = null, .cache_dir_unavailable = false, .mailbox_ttl = 3600 });
 }
 
 fn testAccounts() [2]config.Account {
@@ -2883,6 +3822,7 @@ const accounts = @import("accounts.zig");
 const body = @import("body.zig");
 const desc = @import("descriptions.zig");
 const headers = @import("headers.zig");
+const listmatch = @import("listmatch.zig");
 const mutf7 = @import("imap/mutf7.zig");
 const imap = @import("imap/session.zig");
 const text = @import("text.zig");
@@ -2946,6 +3886,11 @@ const Ctx = struct {
         return out;
     }
 
+    fn booleanOr(ctx: *Ctx, key: []const u8, default: bool) Failure!bool {
+        if (ctx.get(key) == null) return default;
+        return ctx.boolean(key);
+    }
+
     fn boolean(ctx: *Ctx, key: []const u8) Failure!bool {
         const v = ctx.get(key) orelse return ctx.invalid("missing required argument \"{s}\"", .{key});
         if (v != .bool) return ctx.invalid("argument \"{s}\" must be a boolean", .{key});
@@ -2996,13 +3941,13 @@ const Ctx = struct {
 
     /// Runs an IMAP operation; maps failures to a tool error.
     fn imapRun(ctx: *Ctx, idx: usize, op: anytype) Failure!void {
-        ctx.registry.run(idx, op) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => {
-                const d = ctx.registry.diag();
-                return ctx.failed("{s}", .{if (d.len > 0) d else @errorName(err)});
-            },
-        };
+        ctx.registry.run(idx, op) catch |err| return ctx.imapFailed(err);
+    }
+
+    fn imapFailed(ctx: *Ctx, err: accounts.Error) Failure {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        const d = ctx.registry.diag();
+        return ctx.failed("{s}", .{if (d.len > 0) d else @errorName(err)});
     }
 
     fn json(ctx: *Ctx, value: anytype) Failure![]const u8 {
@@ -3017,6 +3962,7 @@ const Param = struct {
     kind: ParamKind,
     description: []const u8,
     default: ?[]const u8 = null,
+    required: bool = true,
 };
 
 const Tool = struct {
@@ -3037,6 +3983,7 @@ pub const tools = [_]Tool{
         p_account,
         .{ .name = "directory", .kind = .string, .description = "Base folder; \"\" for the root" },
         .{ .name = "pattern", .kind = .string, .description = "LIST pattern, e.g. \"*\" or \"Archives%\"" },
+        .{ .name = "refresh", .kind = .boolean, .description = "true to bypass the cached mailbox list", .required = false },
     }, .handler = listMailboxes },
     .{ .name = "mailboxes_status", .description = desc.mailboxes_status, .params = &.{ p_account, p_directory }, .handler = mailboxesStatus },
     .{ .name = "search", .description = desc.search, .params = &.{
@@ -3062,6 +4009,7 @@ pub const tools = [_]Tool{
         p_account,
         .{ .name = "content", .kind = .string, .description = "Raw RFC 822 message" },
     }, .handler = createMessage },
+    .{ .name = "clear_cache", .description = desc.clear_cache, .params = &.{p_account}, .handler = clearCache },
 };
 
 /// Writes the `tools/list` result array.
@@ -3109,7 +4057,7 @@ pub fn writeList(jw: *Stringify) Stringify.Error!void {
         try jw.endObject();
         try jw.objectField("required");
         try jw.beginArray();
-        for (t.params) |p| if (p.default == null) try jw.write(p.name);
+        for (t.params) |p| if (p.required and p.default == null) try jw.write(p.name);
         try jw.endArray();
         try jw.objectField("additionalProperties");
         try jw.write(false);
@@ -3150,25 +4098,28 @@ fn whoami(ctx: *Ctx) Failure![]const u8 {
 
 fn listMailboxes(ctx: *Ctx) Failure![]const u8 {
     const idx = try ctx.account();
-    const op: *ListOp = try ctx.arena.create(ListOp);
-    op.* = .{
-        .arena = ctx.arena,
-        .reference = try ctx.mailbox("directory", null),
-        .pattern = try ctx.mailbox("pattern", null),
-    };
-    try ctx.imapRun(idx, op);
+    const directory = try ctx.string("directory");
+    const pattern = try ctx.string("pattern");
+    try ctx.check(validate.mailbox(directory));
+    try ctx.check(validate.mailbox(pattern));
+    const refresh = try ctx.booleanOr("refresh", false);
+    const all = ctx.registry.mailboxList(idx, ctx.arena, refresh) catch |err| return ctx.imapFailed(err);
 
     const Entry = struct { PATH: []const u8, DELIMITER: ?[]const u8, FLAGS: []const []const u8 };
-    const out = try ctx.arena.alloc(Entry, op.result.len);
-    for (op.result, out) |m, *e| e.* = .{
-        .PATH = mutf7.decode(ctx.arena, m.name) catch |err| switch (err) {
+    var out: std.ArrayList(Entry) = .empty;
+    for (all) |m| {
+        const path = mutf7.decode(ctx.arena, m.name) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidMutf7 => try text.sanitizeUtf8(ctx.arena, m.name),
-        },
-        .DELIMITER = if (m.delimiter) |d| try ctx.arena.dupe(u8, &.{d}) else null,
-        .FLAGS = m.flags,
-    };
-    return ctx.json(out);
+        };
+        if (!listmatch.matches(path, directory, pattern, m.delimiter)) continue;
+        try out.append(ctx.arena, .{
+            .PATH = path,
+            .DELIMITER = if (m.delimiter) |d| try ctx.arena.dupe(u8, &.{d}) else null,
+            .FLAGS = m.flags,
+        });
+    }
+    return ctx.json(out.items);
 }
 
 fn mailboxesStatus(ctx: *Ctx) Failure![]const u8 {
@@ -3205,12 +4156,22 @@ fn fetchAligned(ctx: *Ctx, what: imap.What) Failure!struct { uids: []u32, items:
     return .{ .uids = uids, .items = try alignToUids(ctx.arena, uids, op.result) };
 }
 
+/// Header + size for each UID, from the cache where possible (ADR 0013).
+fn fetchHeaders(ctx: *Ctx) Failure![]?*const Fetched {
+    const idx = try ctx.account();
+    const mailbox = try ctx.mailbox("directory", null);
+    const uids = try ctx.uids();
+    var op: CachedHeadersOp = .{ .arena = ctx.arena, .registry = ctx.registry, .idx = idx, .mailbox = mailbox, .uids = uids };
+    try ctx.imapRun(idx, &op);
+    return alignToUids(ctx.arena, uids, op.result);
+}
+
 fn getHeader(ctx: *Ctx) Failure![]const u8 {
-    const r = try fetchAligned(ctx, .{ .header = true });
+    const items = try fetchHeaders(ctx);
     var aw: std.Io.Writer.Allocating = .init(ctx.arena);
     var jw: Stringify = .{ .writer = &aw.writer };
     jw.beginArray() catch return error.OutOfMemory;
-    for (r.items) |maybe| {
+    for (items) |maybe| {
         const item = maybe orelse {
             jw.write(null) catch return error.OutOfMemory;
             continue;
@@ -3238,9 +4199,9 @@ fn getHeader(ctx: *Ctx) Failure![]const u8 {
 fn getHeaderField(ctx: *Ctx) Failure![]const u8 {
     const field = try ctx.string("field");
     try ctx.check(validate.field(field));
-    const r = try fetchAligned(ctx, .{ .header = true });
-    const out = try ctx.arena.alloc(?[]const []const u8, r.items.len);
-    for (r.items, out) |maybe, *o| {
+    const items = try fetchHeaders(ctx);
+    const out = try ctx.arena.alloc(?[]const []const u8, items.len);
+    for (items, out) |maybe, *o| {
         const item = maybe orelse {
             o.* = null;
             continue;
@@ -3280,9 +4241,9 @@ fn getHtml(ctx: *Ctx) Failure![]const u8 {
 }
 
 fn getSize(ctx: *Ctx) Failure![]const u8 {
-    const r = try fetchAligned(ctx, .{ .size = true });
-    const out = try ctx.arena.alloc(?u32, r.items.len);
-    for (r.items, out) |maybe, *o| o.* = if (maybe) |item| item.size else null;
+    const items = try fetchHeaders(ctx);
+    const out = try ctx.arena.alloc(?u32, items.len);
+    for (items, out) |maybe, *o| o.* = if (maybe) |item| item.size else null;
     return ctx.json(out);
 }
 
@@ -3335,18 +4296,13 @@ fn createMessage(ctx: *Ctx) Failure![]const u8 {
     return ctx.json(.{ .status = "OK", .data = .{try text.sanitizeUtf8(ctx.arena, op.response)} });
 }
 
+fn clearCache(ctx: *Ctx) Failure![]const u8 {
+    const idx = try ctx.account();
+    if (!ctx.registry.clearCache(idx)) return ctx.json(.{ .status = "OK", .note = "caching is disabled for this account" });
+    return ctx.json(.{ .status = "OK" });
+}
+
 // ---- IMAP operations run through Registry.run --------------------------------
-
-const ListOp = struct {
-    arena: Allocator,
-    reference: [:0]const u8,
-    pattern: [:0]const u8,
-    result: []imap.Mailbox = &.{},
-
-    pub fn run(self: *ListOp, s: *Session) accounts.Error!void {
-        self.result = try s.list(self.arena, self.reference, self.pattern);
-    }
-};
 
 const StatusOp = struct {
     mailbox: [:0]const u8,
@@ -3364,7 +4320,7 @@ const SearchOp = struct {
     result: []u32 = &.{},
 
     pub fn run(self: *SearchOp, s: *Session) accounts.Error!void {
-        try s.examine(self.mailbox);
+        _ = try s.examine(self.mailbox);
         self.result = try s.uidSearch(self.arena, self.command);
     }
 };
@@ -3377,8 +4333,47 @@ const FetchOp = struct {
     result: []Fetched = &.{},
 
     pub fn run(self: *FetchOp, s: *Session) accounts.Error!void {
-        try s.examine(self.mailbox);
+        _ = try s.examine(self.mailbox);
         self.result = try s.uidFetch(self.arena, self.uids, self.what);
+    }
+};
+
+const CachedHeadersOp = struct {
+    arena: Allocator,
+    registry: *Registry,
+    idx: usize,
+    mailbox: [:0]const u8,
+    uids: []const u32,
+    result: []Fetched = &.{},
+
+    pub fn run(self: *CachedHeadersOp, s: *Session) accounts.Error!void {
+        const uidvalidity = try s.examine(self.mailbox);
+        // Without a UIDVALIDITY, cached UIDs cannot be trusted: go live.
+        const store = if (uidvalidity != 0) self.registry.cache(self.idx) else null;
+
+        var cached: []Fetched = &.{};
+        if (store) |st| {
+            if (st.syncUidvalidity(self.mailbox, uidvalidity)) |_| {
+                cached = st.getMessages(self.arena, self.mailbox, uidvalidity, self.uids) catch |e| blk: {
+                    self.registry.cacheFailed(self.idx, e);
+                    break :blk &.{};
+                };
+            } else |e| self.registry.cacheFailed(self.idx, e);
+        }
+
+        var missing: std.ArrayList(u32) = .empty;
+        for (self.uids) |u| {
+            for (cached) |c| {
+                if (c.uid == u) break;
+            } else try missing.append(self.arena, u);
+        }
+        var fetched: []Fetched = &.{};
+        if (missing.items.len > 0) {
+            fetched = try s.uidFetch(self.arena, missing.items, .{ .header = true, .size = true });
+            if (self.registry.cache(self.idx)) |st| if (uidvalidity != 0)
+                st.putMessages(self.mailbox, uidvalidity, fetched) catch |e| self.registry.cacheFailed(self.idx, e);
+        }
+        self.result = try std.mem.concat(self.arena, Fetched, &.{ cached, fetched });
     }
 };
 
@@ -3391,7 +4386,7 @@ const StoreOp = struct {
     result: []Fetched = &.{},
 
     pub fn run(self: *StoreOp, s: *Session) accounts.Error!void {
-        try s.select(self.mailbox);
+        _ = try s.select(self.mailbox);
         try s.uidStoreFlags(self.arena, self.uids, self.add, self.keywords);
         self.result = try s.uidFetch(self.arena, self.uids, .{ .flags = true });
     }
@@ -3422,22 +4417,22 @@ pub fn alignToUids(arena: Allocator, uids: []const u32, fetched: []const Fetched
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `zig build test --summary all`
-Expected: all tests pass, including 4 in `tools.zig`.
+Expected: 54/54 tests pass.
 
 - [ ] **Checkpoint: hand off for commit**
 
 Do not run git (the user performs all git operations). Tell the user the task is
-ready and suggest the message: `feat: IMAP tools with input-aligned results and read-only accounts`
+ready and suggest the message: `feat: IMAP tools with cached headers, clear_cache, read-only accounts`
 
 ---
-### Task 10: Prompts and the JSON-RPC stdio loop
+### Task 13: Prompts and the JSON-RPC stdio loop
 
 **Files:**
 - Create: `src/prompts.zig`, `src/mcp.zig`
 - Modify: `src/main.zig` (test block)
 
 **Interfaces:**
-- Consumes: `tools.call`, `tools.writeList` (Task 9), `Registry` (Task 8).
+- Consumes: `tools.call`, `tools.writeList` (Task 12), `Registry` (Task 11).
 - Produces: `mcp.serve(gpa, registry: *Registry, in: *std.Io.Reader, out: *std.Io.Writer) !void` (returns at EOF);
   `mcp.handle(arena, registry, msg) Allocator.Error!?[]const u8`; `mcp.server_name`, `mcp.server_version`;
   `prompts.writeList`, `prompts.render(arena, name, args) GetError![]const u8`.
@@ -3470,7 +4465,7 @@ Create `src/mcp.zig` containing only its tests:
 const testing = std.testing;
 
 fn roundTrip(input: []const u8) ![]u8 {
-    var reg: Registry = try .init(testing.allocator, &.{});
+    var reg: Registry = try .init(testing.allocator, &.{}, .{ .cache_dir = null, .cache_dir_unavailable = false, .mailbox_ttl = 3600 });
     defer reg.deinit();
     var in: std.Io.Reader = .fixed(input);
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -3542,7 +4537,7 @@ test "tools/list and prompts round-trip" {
     var lines = std.mem.splitScalar(u8, got, '\n');
     const list = try std.json.parseFromSlice(std.json.Value, testing.allocator, lines.next().?, .{});
     defer list.deinit();
-    try testing.expectEqual(13, list.value.object.get("result").?.object.get("tools").?.array.items.len);
+    try testing.expectEqual(14, list.value.object.get("result").?.object.get("tools").?.array.items.len);
     try testing.expect(std.mem.find(u8, lines.next().?, "list_patches_of_a_series") != null);
     try testing.expect(std.mem.find(u8, lines.next().?, "\"role\":\"user\"") != null);
 }
@@ -3817,7 +4812,7 @@ fn errorResponse(arena: Allocator, id: std.json.Value, code: i32, message: []con
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `zig build test --summary all`
-Expected: all 47 tests pass.
+Expected: 61/61 tests pass.
 
 - [ ] **Checkpoint: hand off for commit**
 
@@ -3825,14 +4820,14 @@ Do not run git (the user performs all git operations). Tell the user the task is
 ready and suggest the message: `feat: MCP JSON-RPC stdio loop and prompts`
 
 ---
-### Task 11: Entry point, live checks, and client registration
+### Task 14: Entry point, live checks, and client registration
 
 **Files:**
 - Replace: `src/main.zig`, `src/itest.zig`
 - Create: `imap.env.example`
 
 **Interfaces:**
-- Consumes: `config.load`, `Registry`, `mcp.serve`, `tools.call`, `imap/c.zig` `tpi_logout`.
+- Consumes: `config.load`, `config.loadSettings`, `Registry`, `mcp.serve`, `tools.call`, `imap/c.zig` `tpi_logout`.
 
 - [ ] **Step 1: Replace `src/main.zig`**
 
@@ -3849,8 +4844,13 @@ pub fn main(init: std.process.Init) !u8 {
     var stderr_writer = std.Io.File.stderr().writer(init.io, &err_buf);
     const stderr = &stderr_writer.interface;
 
+    const arena = init.arena.allocator();
     try stderr.writeAll(mcp.server_name ++ ": ");
-    const accounts = config.load(init.arena.allocator(), init.environ_map, stderr) catch |err| switch (err) {
+    const accounts, const settings = blk: {
+        const accounts = config.load(arena, init.environ_map, stderr) catch |err| break :blk err;
+        const settings = config.loadSettings(arena, init.environ_map, stderr) catch |err| break :blk err;
+        break :blk .{ accounts, settings };
+    } catch |err| switch (err) {
         error.InvalidConfig => {
             try stderr.writeAll("\n");
             try stderr.flush();
@@ -3858,10 +4858,13 @@ pub fn main(init: std.process.Init) !u8 {
         },
         error.OutOfMemory => return err,
     };
-    try stderr.print("serving {d} account(s) on stdio\n", .{accounts.len});
+    try stderr.print("serving {d} account(s) on stdio; cache: {s}\n", .{
+        accounts.len,
+        settings.cache_dir orelse if (settings.cache_dir_unavailable) "off (set HOME or XDG_CACHE_HOME)" else "off",
+    });
     try stderr.flush();
 
-    var registry: Registry = try .init(init.gpa, accounts);
+    var registry: Registry = try .init(init.gpa, accounts, settings);
     defer registry.deinit();
 
     var in_buf: [64 * 1024]u8 = undefined;
@@ -3875,6 +4878,9 @@ pub fn main(init: std.process.Init) !u8 {
 
 test {
     _ = @import("accounts.zig");
+    _ = @import("cache/sqlite.zig");
+    _ = @import("cache/store.zig");
+    _ = @import("listmatch.zig");
     _ = @import("config.zig");
     _ = @import("headers.zig");
     _ = @import("imap/mutf7.zig");
@@ -3896,6 +4902,7 @@ test {
 //!   op run --env-file imap.env -- zig build itest -- <account> [--write <scratch-mailbox>]
 //!
 //! Read-only by default. Prints only counts and shapes, never message content.
+//! Uses a throwaway cache in .zig-cache/itest-cache, never ~/.cache.
 //! `--write` adds then removes the keyword $TpImapMcpTest on the newest
 //! message of <scratch-mailbox>; use a folder you do not care about.
 
@@ -3949,7 +4956,8 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("config: {s} ({t})\n", .{ diag.buffered(), err });
         return 2;
     };
-    var reg: Registry = try .init(init.gpa, accounts);
+    const cache_dir = ".zig-cache/itest-cache";
+    var reg: Registry = try .init(init.gpa, accounts, .{ .cache_dir = cache_dir, .cache_dir_unavailable = false, .mailbox_ttl = 3600 });
     defer reg.deinit();
     const idx = reg.find(account) orelse {
         std.debug.print("unknown account {s}\n", .{account});
@@ -3958,11 +4966,23 @@ pub fn main(init: std.process.Init) !u8 {
     const h: Harness = .{ .reg = &reg, .arena = arena, .account = account };
     const acct = try std.json.Stringify.valueAlloc(arena, account, .{});
 
+    const cleared = try h.call("clear_cache", "{{\"account\":{s}}}", .{acct});
+    report(cleared != null and reg.cache(idx) != null, "clear_cache (start from an empty cache)", .{});
+
     const who = try h.call("whoami", "{{\"account\":{s}}}", .{acct});
     report(who != null and who.? == .string, "whoami", .{});
 
     const boxes = try h.call("list_mailboxes", "{{\"account\":{s},\"directory\":\"\",\"pattern\":\"*\"}}", .{acct});
     report(boxes != null and boxes.? == .array and boxes.?.array.items.len > 0, "list_mailboxes: {d} mailboxes", .{if (boxes) |b| b.array.items.len else 0});
+
+    const fresh = if (reg.cache(idx)) |store| store.mailboxesFresh(3600) catch false else false;
+    report(fresh, "mailbox list cached after first list_mailboxes", .{});
+    const again_boxes = try h.call("list_mailboxes", "{{\"account\":{s},\"directory\":\"\",\"pattern\":\"*\"}}", .{acct});
+    report(again_boxes != null and boxes != null and again_boxes.?.array.items.len == boxes.?.array.items.len, "list_mailboxes from cache matches server", .{});
+    const inbox = try h.call("list_mailboxes", "{{\"account\":{s},\"directory\":\"\",\"pattern\":\"inbox\"}}", .{acct});
+    report(inbox != null and inbox.?.array.items.len == 1, "local LIST matching: pattern \"inbox\" finds exactly INBOX", .{});
+    const refreshed = try h.call("list_mailboxes", "{{\"account\":{s},\"directory\":\"\",\"pattern\":\"%\",\"refresh\":true}}", .{acct});
+    report(refreshed != null and refreshed.?.array.items.len > 0, "list_mailboxes refresh=true", .{});
 
     const st = try h.call("mailboxes_status", "{{\"account\":{s},\"directory\":\"INBOX\"}}", .{acct});
     report(st != null and st.?.object.get("MESSAGES") != null, "mailboxes_status INBOX", .{});
@@ -3990,6 +5010,21 @@ pub fn main(init: std.process.Init) !u8 {
                 r.?.array.items[0] != .null;
             report(ok, "{s}: aligned, null for missing uid", .{tool});
         }
+        // The header/size calls above populated the cache; a second call must
+        // agree with the first and the rows must be on disk.
+        const h1 = try h.call("get_header_field", "{{\"account\":{s},\"directory\":\"INBOX\",\"uids\":[\"{s}\"],\"field\":\"Message-ID\"}}", .{ acct, last });
+        const h2 = try h.call("get_header_field", "{{\"account\":{s},\"directory\":\"INBOX\",\"uids\":[\"{s}\"],\"field\":\"Message-ID\"}}", .{ acct, last });
+        const same = h1 != null and h2 != null and std.mem.eql(u8,
+            try std.json.Stringify.valueAlloc(arena, h1.?, .{}),
+            try std.json.Stringify.valueAlloc(arena, h2.?, .{}));
+        report(same, "cached header matches live header", .{});
+        const cached_rows = if (reg.cache(idx)) |store| blk: {
+            const wanted = [_]u32{ try std.fmt.parseInt(u32, last, 10), try std.fmt.parseInt(u32, prev, 10) };
+            const rows = store.getMessages(arena, "INBOX", uidvalidityOf(&reg, idx), &wanted) catch break :blk 0;
+            break :blk rows.len;
+        } else 0;
+        report(cached_rows == 2 or (cached_rows == 1 and std.mem.eql(u8, last, prev)), "header rows stored in cache: {d}", .{cached_rows});
+
         const subj = try h.call("get_header_field", "{{\"account\":{s},\"directory\":\"INBOX\",\"uids\":[\"{s}\"],\"field\":\"Subject\"}}", .{ acct, last });
         report(subj != null and subj.?.array.items[0] == .array, "get_header_field Subject", .{});
 
@@ -4000,6 +5035,10 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     if (write_box) |box| try writeChecks(h, acct, box);
+
+    const wiped = try h.call("clear_cache", "{{\"account\":{s}}}", .{acct});
+    const empty = if (reg.cache(idx)) |store| !(store.mailboxesFresh(3600) catch true) else false;
+    report(wiped != null and empty, "clear_cache empties the cache", .{});
 
     std.debug.print("{d} failure(s)\n", .{failures});
     return if (failures == 0) 0 else 1;
@@ -4029,6 +5068,12 @@ fn hasKeyword(v: std.json.Value, uid: []const u8) bool {
     for (flags.array.items) |f| if (std.mem.eql(u8, f.string, "$TpImapMcpTest")) return true;
     return false;
 }
+
+/// UIDVALIDITY of INBOX, read through the registry's live session.
+fn uidvalidityOf(reg: *Registry, idx: usize) u32 {
+    const s = &(reg.slots[idx].session orelse return 0);
+    return s.examine("INBOX") catch 0;
+}
 ```
 
 - [ ] **Step 3: Create `imap.env.example`**
@@ -4043,15 +5088,22 @@ IMAP_TETRA_PASSWORD=op://Tetrapyloctomy/IMAP Tetrapyloctomy/password
 # IMAP_TETRA_PORT=993
 # IMAP_TETRA_READONLY=1
 # IMAP_TETRA_DRAFTS=Drafts
+
+# Cache (ADRs 0013-0015): $XDG_CACHE_HOME/tp-imap-mcp or ~/.cache/tp-imap-mcp
+# TP_IMAP_MCP_CACHE=0            # disable caching
+# TP_IMAP_MCP_MAILBOX_TTL=3600   # seconds a cached mailbox list stays fresh
 ```
 
 - [ ] **Step 4: Unit tests and offline smoke tests**
 
 Run: `zig build test --summary all`
-Expected: 47/47 pass.
+Expected: 61/61 pass.
 
 Run: `zig build && env -i ./zig-out/bin/tp_imap_mcp </dev/null; echo "exit=$?"`
 Expected: stderr `tp-imap-mcp: IMAP_ACCOUNTS is missing or empty`, then `exit=1`.
+
+Run: `env -i IMAP_ACCOUNTS=a IMAP_A_HOST=h IMAP_A_LOGIN=l IMAP_A_PASSWORD=p HOME=/tmp/tp-imap-mcp-smoke ./zig-out/bin/tp_imap_mcp </dev/null`
+Expected: stderr `tp-imap-mcp: serving 1 account(s) on stdio; cache: /tmp/tp-imap-mcp-smoke/.cache/tp-imap-mcp`. (No cache file is created until a tool needs it.)
 
 Run:
 ```bash
@@ -4069,7 +5121,9 @@ The checks need the user's 1Password session. Ask the user to create `imap.env` 
 ! op run --env-file imap.env -- zig build itest -- tetra
 ```
 
-Expected: 13 `PASS` lines and `0 failure(s)`. Do not run `--write` unless the user explicitly asks for it and names a scratch mailbox.
+Expected: 20 `PASS` lines (12 read/reconnect checks plus 8 cache checks) and `0 failure(s)`. The cache used is `.zig-cache/itest-cache`. Do not run `--write` unless the user explicitly asks for it and names a scratch mailbox.
+
+If a cache check fails, stop and report it with the output; the cache has not been verified live before this step.
 
 - [ ] **Step 6: Register with an MCP client (the user does this)**
 
@@ -4089,6 +5143,8 @@ Give the user this registration (absolute paths filled in):
 
 For Claude Code the equivalent is:
 `claude mcp add imap -- op run --env-file /Users/pablo/code/posiczko/tp-imap-mcp/imap.env -- /Users/pablo/code/posiczko/tp-imap-mcp/zig-out/bin/tp_imap_mcp`
+
+After the first real session, confirm the cache file exists with mode 0600: `ls -l ~/.cache/tp-imap-mcp/` (or under `$XDG_CACHE_HOME`).
 
 Verify `create_message` manually (MCP Inspector or the client) only against an account whose drafts folder the user is happy to receive a test message in.
 

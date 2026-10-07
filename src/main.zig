@@ -1,71 +1,65 @@
+//! tp-imap-mcp: an MCP server exposing IMAP mailboxes over stdio.
+
 const std = @import("std");
-const Io = std.Io;
+const config = @import("config.zig");
+const mcp = @import("mcp.zig");
+const Registry = @import("accounts.zig").Registry;
 
-const tp_imap_mcp = @import("tp_imap_mcp");
+pub fn main(init: std.process.Init) !u8 {
+    var err_buf: [1024]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writer(init.io, &err_buf);
+    const stderr = &stderr_writer.interface;
 
-pub fn main(init: std.process.Init) !void {
-    // Prints to stderr, unbuffered, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-
-    // This is appropriate for anything that lives as long as the process.
-    const arena: std.mem.Allocator = init.arena.allocator();
-
-    // Accessing command line arguments:
-    const args = try init.minimal.args.toSlice(arena);
-    for (args) |arg| {
-        std.log.info("arg: {s}", .{arg});
-    }
-
-    // In order to do I/O operations need an `Io` instance.
-    const io = init.io;
-
-    // Stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
-    const stdout_writer = &stdout_file_writer.interface;
-
-    try tp_imap_mcp.printAnotherMessage(stdout_writer);
-
-    try stdout_writer.flush(); // Don't forget to flush!
-}
-
-test "simple test" {
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(i32) = .empty;
-    defer list.deinit(gpa); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(gpa, 42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
-
-test "fuzz example" {
-    try std.testing.fuzz({}, testOne, .{});
-}
-
-fn testOne(context: void, smith: *std.testing.Smith) !void {
-    _ = context;
-    // Try command `zig build test --fuzz -Doptimize=ReleaseFast` to see if it manages to fail this test case!
-
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(u8) = .empty;
-    defer list.deinit(gpa);
-    while (!smith.eos()) switch (smith.value(enum { add_data, dup_data })) {
-        .add_data => {
-            const slice = try list.addManyAsSlice(gpa, smith.value(u4));
-            smith.bytes(slice);
+    const arena = init.arena.allocator();
+    try stderr.writeAll(mcp.server_name ++ ": ");
+    const accounts, const settings = blk: {
+        const accounts = config.load(arena, init.environ_map, stderr) catch |err| break :blk err;
+        const settings = config.loadSettings(arena, init.environ_map, stderr) catch |err| break :blk err;
+        break :blk .{ accounts, settings };
+    } catch |err| switch (err) {
+        error.InvalidConfig => {
+            try stderr.writeAll("\n");
+            try stderr.flush();
+            return 1;
         },
-        .dup_data => {
-            if (list.items.len == 0) continue;
-            if (list.items.len > std.math.maxInt(u32)) return error.SkipZigTest;
-            const len = smith.valueRangeAtMost(u32, 1, @min(32, list.items.len));
-            const off = smith.valueRangeAtMost(u32, 0, @intCast(list.items.len - len));
-            try list.appendSlice(gpa, list.items[off..][0..len]);
-            try std.testing.expectEqualSlices(
-                u8,
-                list.items[off..][0..len],
-                list.items[list.items.len - len ..],
-            );
-        },
+        error.OutOfMemory => return err,
     };
+    if (std.c.access(settings.ca_file, 4) != 0) { // R_OK
+        try stderr.print("CA bundle {s} is not readable; install ca-certificates (brew install ca-certificates) or set TP_IMAP_MCP_CA_FILE\n", .{settings.ca_file});
+        try stderr.flush();
+        return 1;
+    }
+    try stderr.print("serving {d} account(s) on stdio; cache: {s}\n", .{
+        accounts.len,
+        settings.cache_dir orelse if (settings.cache_dir_unavailable) "off (set HOME or XDG_CACHE_HOME)" else "off",
+    });
+    try stderr.flush();
+
+    var registry: Registry = try .init(init.gpa, accounts, settings);
+    defer registry.deinit();
+
+    var in_buf: [64 * 1024]u8 = undefined;
+    var stdin_reader = std.Io.File.stdin().reader(init.io, &in_buf);
+    var out_buf: [64 * 1024]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(init.io, &out_buf);
+
+    try mcp.serve(init.gpa, &registry, &stdin_reader.interface, &stdout_writer.interface);
+    return 0;
+}
+
+test {
+    _ = @import("accounts.zig");
+    _ = @import("cache/sqlite.zig");
+    _ = @import("cache/store.zig");
+    _ = @import("listmatch.zig");
+    _ = @import("config.zig");
+    _ = @import("headers.zig");
+    _ = @import("imap/mutf7.zig");
+    _ = @import("imap/session.zig");
+    _ = @import("mcp.zig");
+    _ = @import("mime_test.zig");
+    _ = @import("prompts.zig");
+    _ = @import("text.zig");
+    _ = @import("tools.zig");
+    _ = @import("validate.zig");
 }
