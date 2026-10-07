@@ -32,7 +32,7 @@ tp-imap-mcp exposes IMAP mailboxes to MCP clients (Claude Code, Claude Desktop, 
 | 👀 Read-only accounts | `IMAP_<NAME>_READONLY=1` refuses the two write tools; reads never mark mail as seen. |
 | ⚡ Local cache | Mailbox list and message headers/sizes cached in SQLite under `~/.cache/tp-imap-mcp/`. |
 | 🔎 Full IMAP search | The model's IMAP `SEARCH` criteria are passed through, with input validation against command injection. |
-| 🙈 Sensitive-content filters | Password-reset emails (and anything you define) are withheld: the model learns they exist, never their content. On by default. |
+| 🙈 Sensitive-content filters | Password-reset and one-time-code emails (and anything you define) are withheld: the model learns they exist, never their content. On by default. |
 | 🧼 Output sanitization | Plain text only; hidden HTML, comments, scripts and invisible Unicode removed; headers decoded; size caps — a defense against prompt injection. |
 
 ## 🚀 Quick Start
@@ -245,7 +245,7 @@ All configuration is environment variables (usually via `op run --env-file imap.
 | `TP_IMAP_MCP_MAILBOX_TTL` | no | Seconds the cached mailbox list stays fresh (default `3600`) |
 | `TP_IMAP_MCP_CA_FILE` | no | PEM bundle for TLS verification (default `/opt/homebrew/etc/ca-certificates/cert.pem`) |
 | `XDG_CACHE_HOME` | no | Cache location base (default `~/.cache`) |
-| `TP_IMAP_MCP_FILTERS` | no | Active sensitive-content filters, comma-separated, or `none` (default `password_reset`) |
+| `TP_IMAP_MCP_FILTERS` | no | Active sensitive-content filters, comma-separated, or `none` (default `password_reset,one_time_codes`) |
 | `IMAP_<NAME>_FILTERS` | no | Per-account override of `TP_IMAP_MCP_FILTERS` |
 | `XDG_CONFIG_HOME` | no | Config location base for `filters.zon` (default `~/.config`) |
 | `TP_IMAP_MCP_MAX_BODY_BYTES` | no | Max bytes per message body after sanitizing (default `32768`, min `1024`) |
@@ -355,7 +355,7 @@ What the model sees, after filtering and sanitizing:
 | A folder created elsewhere doesn't show up | The mailbox list is cached for an hour; ask for a refresh. |
 | `TP_IMAP_MCP_FILTERS: unknown filter "x"` | The name isn't built in or defined in `filters.zon`; fix the name or use `none`. |
 | `…/filters.zon: filter "x" rule N condition M: …` | Fix the named rule (exactly one of `.contains`/`.glob`/`.regex`, non-empty patterns, valid regex) and restart. |
-| An email shows `[withheld by filter "…"]` | Working as intended. Disable for an account with `IMAP_<NAME>_FILTERS=none`, or narrow the rules in `filters.zon`. |
+| An email shows `[withheld by filter "…"]` | Working as intended. Disable for an account with `IMAP_<NAME>_FILTERS=none` (or keep just one, e.g. `IMAP_<NAME>_FILTERS=password_reset` to let the assistant read login codes), or narrow the rules in `filters.zon`. |
 | `… must be a number of bytes >= 1024` | Fix `TP_IMAP_MCP_MAX_BODY_BYTES` / `TP_IMAP_MCP_MAX_RESPONSE_BYTES`. |
 
 ## 🛠 Tech Stack
@@ -417,7 +417,7 @@ CI (`.github/workflows/ci.yml`) runs the unit tests, an optimized build, and a s
 - [x] Sensitive-content filters — [spec](docs/superpowers/specs/2026-10-07-sensitive-content-filters-design.md) · [ADR 0017](docs/adr/0017-sensitive-content-filters.md)
 - [x] Output sanitization — [spec](docs/superpowers/specs/2026-10-07-output-sanitization-design.md) · [ADR 0018](docs/adr/0018-sanitize-model-bound-output.md) · [ADR 0019](docs/adr/0019-decoded-sanitized-header-values.md)
 - [x] Attachment listing (`list_attachments`, metadata only)
-- [ ] Built-in `one_time_codes` filter (2FA / magic-link emails)
+- [x] Built-in `one_time_codes` filter (2FA codes, sign-in links, verification emails), on by default
 - [ ] Deferred minor issues — see [docs/TODO.md](docs/TODO.md)
 
 ## 🤝 Contributing

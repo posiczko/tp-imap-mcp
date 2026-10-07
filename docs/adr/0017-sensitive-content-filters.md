@@ -64,3 +64,4 @@ choice. Options for configuration: (A) built-ins plus an optional config file;
   changing tool signatures.
 - First use of `$XDG_CONFIG_HOME` (ADR 0014).
 - 2026-10-07: also applies to `list_attachments` (withheld marker; file names can be sensitive).
+- 2026-10-07: built-in `one_time_codes` added; the default becomes `password_reset,one_time_codes` (user's choice: on by default).

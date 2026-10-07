@@ -146,7 +146,7 @@ pub fn loadLibrary(arena: Allocator, gpa: Allocator, io: std.Io, config_dir: ?[]
 }
 
 /// Active filters per account, from TP_IMAP_MCP_FILTERS (default
-/// "password_reset") and IMAP_<NAME>_FILTERS overrides.
+/// "password_reset,one_time_codes") and IMAP_<NAME>_FILTERS overrides.
 pub fn resolveActive(
     arena: Allocator,
     library: []const rules.Filter,
@@ -155,7 +155,7 @@ pub fn resolveActive(
     diag: *std.Io.Writer,
 ) Error![]const []const *const rules.Filter {
     const global_key = "TP_IMAP_MCP_FILTERS";
-    const global_raw = env.get(global_key) orelse "password_reset";
+    const global_raw = env.get(global_key) orelse "password_reset,one_time_codes";
     const global = try parseList(arena, library, global_key, global_raw, diag);
 
     const out = try arena.alloc([]const *const rules.Filter, accounts.len);
@@ -228,13 +228,14 @@ test "valid file: user filter plus built-in replacement" {
     try testing.expectEqualStrings("from", parsed[0].rules[0].conditions[0].field);
 
     const lib = try merge(a, parsed);
-    try testing.expectEqual(2, lib.len);
+    try testing.expectEqual(3, lib.len); // password_reset (replaced), one_time_codes, banking
     try testing.expectEqualStrings("password_reset", lib[0].name);
     try testing.expectEqualStrings("passwort", lib[0].rules[0].conditions[0].matcher.contains[0]);
-    try testing.expectEqualStrings("banking", lib[1].name);
+    try testing.expectEqualStrings("one_time_codes", lib[1].name);
+    try testing.expectEqualStrings("banking", lib[2].name);
 
     const hs = try rules.decodeHeaders(a, "From: PayPal <service@paypal.com>\r\nSubject: Your Receipt\r\n\r\n");
-    try testing.expect(try rules.filterMatches(a, lib[1], hs));
+    try testing.expect(try rules.filterMatches(a, lib[2], hs));
 }
 
 test "invalid files are rejected with a precise message" {
@@ -273,8 +274,8 @@ test "file on disk is read and merged" {
     var diag: std.Io.Writer = .fixed(&buf);
     const dir = try a.print(".zig-cache/tmp/{s}", .{&tmp.sub_path});
     const lib = try loadLibrary(a, testing.allocator, testing.io, dir, &diag);
-    try testing.expectEqual(2, lib.len);
-    try testing.expectEqualStrings("banking", lib[1].name);
+    try testing.expectEqual(3, lib.len);
+    try testing.expectEqualStrings("banking", lib[2].name);
 }
 
 test "activation: default, none, per-account override, errors" {
@@ -291,8 +292,10 @@ test "activation: default, none, per-account override, errors" {
     var diag: std.Io.Writer = .fixed(&buf);
 
     const default = try resolveActive(a, lib, TestEnv{ .map = .initComptime(.{}) }, &accounts, &diag);
+    try testing.expectEqual(2, default[0].len);
     try testing.expectEqualStrings("password_reset", default[0][0].name);
-    try testing.expectEqual(1, default[1].len);
+    try testing.expectEqualStrings("one_time_codes", default[0][1].name);
+    try testing.expectEqual(2, default[1].len);
 
     const mixed = try resolveActive(a, lib, TestEnv{ .map = .initComptime(.{
         .{ "TP_IMAP_MCP_FILTERS", "none" },

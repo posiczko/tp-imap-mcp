@@ -14,8 +14,8 @@ pub const list_accounts =
     \\    filters are the account's active sensitive-content filters. Messages
     \\    they match are withheld: get_text/get_html return
     \\    [withheld by filter "<name>"] and get_header shows only date and from.
-    \\    The built-in password_reset filter matches subjects about password
-    \\    resets and account recovery.
+    \\    Built-in filters: password_reset (password resets, account recovery)
+    \\    and one_time_codes (verification and sign-in codes, 2FA, magic links).
 ;
 
 pub const whoami =

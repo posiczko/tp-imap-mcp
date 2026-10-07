@@ -69,7 +69,7 @@ Built-ins live in code (`src/filter/rules.zig`) and are documented in the
 
 | Variable | Meaning |
 |---|---|
-| `TP_IMAP_MCP_FILTERS` | Comma-separated active filters, or `none`. **Unset = `password_reset`** (on by default). |
+| `TP_IMAP_MCP_FILTERS` | Comma-separated active filters, or `none`. **Unset = `password_reset,one_time_codes`** (on by default). |
 | `IMAP_<NAME>_FILTERS` | Same syntax; overrides the global value for one account. |
 
 Order matters only for which filter name is reported when several match.
@@ -225,3 +225,6 @@ Integration (`zig build itest`, live, read-only):
   `Reset\u200B your password` still matches. `get_text`/`get_html` fetch a
   body only for UIDs whose merged header data was received and matched no
   filter (fail closed: no headers, no body).
+- 2026-10-07: built-in `one_time_codes` added (subject contains verification /
+  sign-in / one-time code, 2FA, magic-link phrases; bare "otp" deliberately
+  excluded) and made active by default alongside `password_reset`.

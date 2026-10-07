@@ -56,7 +56,24 @@ pub const password_reset: Filter = .{
     }} }},
 };
 
-pub const builtins = [_]Filter{password_reset};
+/// 2FA codes, sign-in links, verification emails: they grant access like a
+/// reset link does. Bare "otp" is omitted on purpose (matches "hotpot").
+pub const one_time_codes: Filter = .{
+    .name = "one_time_codes",
+    .rules = &.{.{ .conditions = &.{.{
+        .field = "subject",
+        .matcher = .{ .contains = &.{
+            "verification code", "verify your email",  "confirm your email", "confirmation code",
+            "security code",     "authentication code", "access code",       "passcode",
+            "login code",        "log-in code",        "sign-in code",       "sign in code",
+            "your code is",      "one-time code",      "one-time password",  "one time password",
+            "one-time passcode", "two-factor",         "2fa",                "magic link",
+            "sign-in link",      "login link",
+        } },
+    }} }},
+};
+
+pub const builtins = [_]Filter{ password_reset, one_time_codes };
 
 /// Parses a raw header block and prepares every value for matching the way
 /// the model will see it: RFC 2047-decoded, invisible characters removed,
@@ -187,4 +204,31 @@ test "review: invisible characters and NBSP do not defeat filters" {
     try testing.expectEqualStrings("password_reset", (try classify(a, &active, try subject(a, "Reset\u{200B} your password"))).?);
     try testing.expectEqualStrings("password_reset", (try classify(a, &active, try subject(a, "Reset\u{A0}your password"))).?);
     try testing.expectEqualStrings("password_reset", (try classify(a, &active, try subject(a, "=?UTF-8?B?UmVzZXTigIsgeW91ciBwYXNzd29yZA==?="))).?);
+}
+
+test "built-in one_time_codes: positives and near-misses" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const active = [_]*const Filter{&one_time_codes};
+    for ([_][]const u8{
+        "123456 is your Google verification code",
+        "Your Amazon sign-in code",
+        "Your magic link to Slack",
+        "=?UTF-8?Q?Your_verification_code?=",
+        "Your one-time passcode",
+        "Enable 2FA: your security code",
+        "Confirm your email address",
+        "Your login\u{200B} code",
+    }) |s| {
+        const got = try classify(a, &active, try subject(a, s));
+        try testing.expectEqualStrings("one_time_codes", got orelse return error.TestExpectedMatch);
+    }
+    for ([_][]const u8{
+        "Dress code for Friday",
+        "Code review: PR #42",
+        "Verification of your order address",
+        "Access control changes",
+        "Hotpot night!",
+    }) |s| try testing.expect((try classify(a, &active, try subject(a, s))) == null);
 }
