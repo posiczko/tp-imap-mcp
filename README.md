@@ -403,6 +403,8 @@ op run --env-file imap.env -- zig build itest -- work # live read-only checks ag
 
 The live checks print only PASS/FAIL lines and use a throwaway cache in `.zig-cache/`.
 
+CI (`.github/workflows/ci.yml`) runs the unit tests, an optimized build, and a startup smoke test on Apple Silicon macOS for every push and pull request, with Zig pinned to 0.17.0 (checksum-verified). The live checks are not run in CI because they need your 1Password credentials.
+
 </details>
 
 ## 🗺 Roadmap

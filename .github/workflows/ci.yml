@@ -1,0 +1,60 @@
+# Unit tests and an optimized build on Apple Silicon macOS.
+# The live IMAP checks (zig build itest) need 1Password credentials and stay
+# manual; see README "Check the configuration".
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZIG_VERSION: 0.17.0
+  # From https://ziglang.org/download/index.json (0.17.0, aarch64-macos).
+  ZIG_SHA256: b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a
+
+jobs:
+  test:
+    runs-on: macos-15 # Apple Silicon
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }} (pinned, checksum-verified)
+        run: |
+          tarball="zig-aarch64-macos-${ZIG_VERSION}.tar.xz"
+          curl -fsSL -o "$RUNNER_TEMP/$tarball" "https://ziglang.org/download/${ZIG_VERSION}/${tarball}"
+          echo "${ZIG_SHA256}  $RUNNER_TEMP/$tarball" | shasum -a 256 -c -
+          tar -xJf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-aarch64-macos-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Install libetpan and CA certificates
+        run: brew install libetpan ca-certificates
+
+      - name: Toolchain versions
+        run: |
+          zig version
+          pkg-config --modversion libetpan
+
+      - name: Unit tests
+        run: zig build test --summary all
+
+      - name: Optimized build
+        run: zig build -Doptimize=safe
+
+      - name: Smoke test (startup without config fails cleanly)
+        run: |
+          set +e
+          out=$(env -i ./zig-out/bin/tp_imap_mcp </dev/null 2>&1)
+          code=$?
+          set -e
+          echo "$out"
+          test "$code" -eq 1
+          echo "$out" | grep -q "IMAP_ACCOUNTS is missing or empty"
