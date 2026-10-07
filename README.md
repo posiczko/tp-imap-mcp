@@ -6,6 +6,7 @@
 ![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon-000000?style=for-the-badge&logo=apple&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-stdio-6E56CF?style=for-the-badge)
 ![Status](https://img.shields.io/badge/Status-working-2EA043?style=for-the-badge)
+![License](https://img.shields.io/badge/License-MIT-lightgrey?style=for-the-badge)
 
 **An MCP server that lets an AI assistant read and search several IMAP mailboxes — with credentials from 1Password, verified TLS, a local cache, and filters that keep sensitive mail out of the model.**
 
@@ -421,5 +422,4 @@ Decisions are recorded as ADRs in [`docs/adr/`](docs/adr/README.md); significant
 
 ## 📄 License
 
-> [!WARNING]
-> No license has been chosen yet; until a `LICENSE` file is added, all rights are reserved by the author.
+[MIT](LICENSE) — P. Osiczko
