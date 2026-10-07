@@ -88,9 +88,12 @@ static int append_part(growbuf *g, struct mailmime *part) {
   const char *charset = sf.fld_content_charset != NULL ? sf.fld_content_charset : "utf-8";
   int rc = 0;
   char *converted = NULL;
+  size_t converted_len = 0;
+  /* charconv_buffer reports the length, so an embedded NUL does not truncate. */
   if (strcasecmp(charset, "utf-8") != 0 && strcasecmp(charset, "us-ascii") != 0 &&
-      charconv("utf-8", charset, decoded, decoded_len, &converted) == MAIL_CHARCONV_NO_ERROR) {
-    rc = grow_append(g, converted, strlen(converted));
+      charconv_buffer("utf-8", charset, decoded, decoded_len, &converted, &converted_len) ==
+          MAIL_CHARCONV_NO_ERROR) {
+    rc = grow_append(g, converted, converted_len);
     charconv_buffer_free(converted);
   } else {
     /* UTF-8, ASCII, or unknown charset: pass bytes through; the Zig layer

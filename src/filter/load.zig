@@ -84,8 +84,12 @@ pub fn parseFile(arena: Allocator, gpa: Allocator, source: [:0]const u8, path: [
                 const pats = fc.contains orelse fc.glob orelse fc.regex.?;
                 if (pats.len == 0)
                     return fail(diag, "{s}: filter \"{s}\" rule {d} condition {d}: pattern list is empty", where);
-                for (pats) |p| if (p.len == 0)
-                    return fail(diag, "{s}: filter \"{s}\" rule {d} condition {d}: empty pattern", where);
+                for (pats) |p| {
+                    if (p.len == 0)
+                        return fail(diag, "{s}: filter \"{s}\" rule {d} condition {d}: empty pattern", where);
+                    if (std.mem.findScalar(u8, p, 0) != null)
+                        return fail(diag, "{s}: filter \"{s}\" rule {d} condition {d}: pattern contains NUL", where);
+                }
 
                 c.* = .{
                     .field = try std.ascii.allocLowerString(arena, fc.field),
@@ -308,4 +312,9 @@ test "activation: default, none, per-account override, errors" {
         try testing.expectError(error.InvalidFilters, resolveActive(a, lib, TestEnv{ .map = .initComptime(.{.{ "TP_IMAP_MCP_FILTERS", case[0] }}) }, &accounts, &diag));
         try testing.expect(std.mem.find(u8, diag.buffered(), case[1]) != null);
     }
+}
+
+test "todo: patterns containing NUL are rejected" {
+    try expectParseError(".{ .filters = .{ .{ .name = \"x\", .rules = .{ .{ .{ .field = \"subject\", .regex = .{\"a\\x00b\"} } } } } } }", "contains NUL");
+    try expectParseError(".{ .filters = .{ .{ .name = \"x\", .rules = .{ .{ .{ .field = \"subject\", .contains = .{\"a\\x00b\"} } } } } } }", "contains NUL");
 }

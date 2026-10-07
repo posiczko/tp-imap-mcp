@@ -9,9 +9,15 @@ const entities = @import("entities.zig");
 const max_depth = 256;
 
 /// Elements whose content is not HTML and is dropped whole.
-const raw_text = [_][]const u8{ "script", "style", "template", "noscript", "iframe", "object", "svg", "textarea", "title" };
+const raw_text = [_][]const u8{ "script", "style", "template", "noscript", "iframe", "object", "svg", "textarea", "title", "noembed", "noframes" };
 /// Elements dropped with their subtree (content is still tokenized).
-const dropped_elements = [_][]const u8{ "head", "picture", "video", "audio", "canvas" };
+const dropped_elements = [_][]const u8{ "head", "picture", "video", "audio", "canvas", "datalist" };
+/// Start tags that close an open <p> (HTML "p in button scope", simplified).
+const p_closers = [_][]const u8{
+    "p",       "div",     "ul",     "ol",   "dl",   "table",    "pre", "blockquote", "section", "article",
+    "header",  "footer",  "main",   "nav",  "aside", "form",    "fieldset", "address", "h1",  "h2",
+    "h3",      "h4",      "h5",     "h6",   "hr",   "center",
+};
 const void_elements = [_][]const u8{ "br", "hr", "img", "input", "meta", "link", "wbr", "area", "base", "col", "embed", "source", "track" };
 const block_elements = [_][]const u8{
     "p",    "div",  "section", "article", "header", "footer",  "main", "nav", "aside",   "blockquote",
@@ -154,6 +160,13 @@ const Converter = struct {
         if (isOneOf(e.name, &block_elements)) try self.breakLine();
     }
 
+    fn closeOpenP(self: *Converter) Allocator.Error!void {
+        var i = self.depth;
+        while (i > 0) : (i -= 1) {
+            if (std.mem.eql(u8, self.stack[i - 1].name, "p")) return self.popTo("p");
+        }
+    }
+
     fn startTag(self: *Converter, tag: Tag) Allocator.Error!void {
         const name = tag.name;
         if (isOneOf(name, &void_elements)) {
@@ -165,7 +178,8 @@ const Converter = struct {
             }
             return;
         }
-        const hides = isOneOf(name, &dropped_elements) or tag.hidden or try styleHides(self.arena, tag.style);
+        const closed_dialog = std.mem.eql(u8, name, "dialog") and !tag.open;
+        const hides = isOneOf(name, &dropped_elements) or closed_dialog or tag.hidden or try styleHides(self.arena, tag.style);
         if (self.visible() and !hides) {
             if (isOneOf(name, &block_elements)) try self.breakLine();
             if (std.mem.eql(u8, name, "li")) {
@@ -174,6 +188,9 @@ const Converter = struct {
             }
             if (std.mem.eql(u8, name, "td") or std.mem.eql(u8, name, "th")) self.pending_space = true;
         }
+        // A block start implicitly closes an open <p> (as browsers do), so an
+        // unclosed <p hidden> cannot hide the rest of the document.
+        if (isOneOf(name, &p_closers)) try self.closeOpenP();
         const href: ?[]const u8 = if (std.mem.eql(u8, name, "a")) safeHref(tag.href) else null;
         self.push(.{
             .name = name,
@@ -185,9 +202,12 @@ const Converter = struct {
     }
 };
 
-/// `http`, `https` and `mailto` links only (spec §3.5).
+/// `http`, `https` and `mailto` links only (spec §3.5), without inner
+/// whitespace or control characters, at most 2048 bytes.
 fn safeHref(href: ?[]const u8) ?[]const u8 {
     const h = std.mem.trim(u8, href orelse return null, " \t\r\n");
+    if (h.len > 2048) return null;
+    for (h) |ch| if (ch <= 0x20 or ch == 0x7F) return null;
     for ([_][]const u8{ "http:", "https:", "mailto:" }) |scheme| {
         if (std.ascii.startsWithIgnoreCase(h, scheme) and h.len > scheme.len) return h;
     }
@@ -244,6 +264,8 @@ fn zeroValue(s: []const u8, prop: []const u8, ends: []const []const u8) bool {
 const Tag = struct {
     name: []const u8,
     hidden: bool = false,
+    open: bool = false, // <dialog open>
+    self_closing: bool = false, // ended with "/>"
     style: ?[]const u8 = null,
     href: ?[]const u8 = null,
 };
@@ -263,7 +285,10 @@ fn parseStartTag(arena: Allocator, html: []const u8, start: usize) Allocator.Err
     while (i < html.len) {
         while (i < html.len and (std.ascii.isWhitespace(html[i]) or html[i] == '/')) i += 1;
         if (i >= html.len) break;
-        if (html[i] == '>') return .{ .tag = tag, .next = i + 1 };
+        if (html[i] == '>') {
+            tag.self_closing = i > start and html[i - 1] == '/';
+            return .{ .tag = tag, .next = i + 1 };
+        }
         const an_start = i;
         while (i < html.len and !std.ascii.isWhitespace(html[i]) and html[i] != '=' and html[i] != '>' and html[i] != '/') i += 1;
         const attr = html[an_start..i];
@@ -290,6 +315,7 @@ fn parseStartTag(arena: Allocator, html: []const u8, start: usize) Allocator.Err
         }
         // Browsers use the first occurrence of a repeated attribute.
         if (std.ascii.eqlIgnoreCase(attr, "hidden")) tag.hidden = true;
+        if (std.ascii.eqlIgnoreCase(attr, "open")) tag.open = true;
         if (std.ascii.eqlIgnoreCase(attr, "style") and tag.style == null) tag.style = if (value) |v| try entities.decodeAll(arena, v) else "";
         if (std.ascii.eqlIgnoreCase(attr, "href") and !seen_href) {
             seen_href = true;
@@ -341,6 +367,10 @@ pub fn toText(arena: Allocator, html: []const u8) Allocator.Error![]const u8 {
         } else if (rest.len > 1 and (rest[1] == '!' or rest[1] == '?')) {
             const end = std.mem.findScalarPos(u8, html, i, '>') orelse html.len;
             i = @min(html.len, end + 1);
+        } else if (rest.len > 2 and rest[1] == '/' and !std.ascii.isAlphabetic(rest[2]) and rest[2] != '>') {
+            // `</` + non-letter is a bogus comment up to the next '>' (as in browsers).
+            const end = std.mem.findScalarPos(u8, html, i, '>') orelse html.len;
+            i = @min(html.len, end + 1);
         } else if (rest.len > 2 and rest[1] == '/' and std.ascii.isAlphabetic(rest[2])) {
             var j = i + 2;
             while (j < html.len and isNameChar(html[j])) j += 1;
@@ -352,7 +382,8 @@ pub fn toText(arena: Allocator, html: []const u8) Allocator.Error![]const u8 {
             const parsed = try parseStartTag(arena, html, i);
             i = parsed.next;
             if (isOneOf(parsed.tag.name, &raw_text)) {
-                i = skipRawText(html, i, parsed.tag.name);
+                // `<svg/>` is complete; anything else runs to its end tag.
+                if (!parsed.tag.self_closing) i = skipRawText(html, i, parsed.tag.name);
             } else {
                 try c.startTag(parsed.tag);
             }
@@ -555,4 +586,40 @@ test "review: hiding past the depth cap still hides" {
 test "review: a hidden link renders nothing, not even its URL" {
     try expectText("a<a hidden href=\"https://evil.example/IGNORE\">x</a>b", "ab");
     try expectText("a<a style=\"display:none\" href=\"https://evil.example/IGNORE\">x</a>b", "ab");
+}
+
+test "todo: elements browsers hide by default are dropped" {
+    try expectText("a<noembed>x</noembed>b", "ab");
+    try expectText("a<noframes>x</noframes>b", "ab");
+    try expectText("a<datalist><option>x</option></datalist>b", "ab");
+    try expectText("a<dialog>x</dialog>b", "ab");
+    try expectText("a<dialog open>y</dialog>b", "ayb");
+}
+
+test "todo: '</' followed by a non-letter is a bogus comment" {
+    try expectText("a</ hidden text>b", "ab");
+    try expectText("a</1 hidden>b", "ab");
+}
+
+test "todo: link targets with whitespace or excessive length are dropped" {
+    try expectText("<a href=\"https://x.example/a b\">t</a>", "t");
+    try expectText("<a href=\"https://x.example/a\nIGNORE\">t</a>", "t");
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var src: std.ArrayList(u8) = .empty;
+    try src.appendSlice(a, "<a href=\"https://x.example/");
+    try src.appendNTimes(a, 'q', 3000);
+    try src.appendSlice(a, "\">t</a>");
+    try testing.expectEqualStrings("t", try toText(a, src.items));
+}
+
+test "todo: self-closing raw-text elements and implicit </p>" {
+    try expectText("a<svg/>b", "ab");
+    try expectText("<p hidden>x<p>y", "y");
+    try expectText("<p>one<div>two</div>", "one\ntwo");
+}
+
+test "todo: entity-encoded markup is rendered as inert literal text" {
+    try expectText("&lt;script&gt;alert(1)&lt;/script&gt;", "<script>alert(1)</script>");
 }

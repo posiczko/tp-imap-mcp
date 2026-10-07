@@ -328,7 +328,7 @@ What the model sees, after filtering and sanitizing:
 ## 🔒 Security model
 
 - **TLS:** the server certificate must chain to the CA bundle and match the configured host; otherwise the connection is refused and no credentials are sent.
-- **Secrets:** only in memory, from the environment; never logged or returned by tools.
+- **Secrets:** only in memory, from the environment `op run` provides; never logged or returned by tools. The server zeroes its own copy on exit; the environment copy lives as long as the process.
 - **Command injection:** search criteria cannot contain CR/LF/NUL; UIDs, keywords, and header names are validated.
 - **Read-only accounts:** write tools refuse before contacting the server.
 - **Cache:** `~/.cache/tp-imap-mcp/<account>.sqlite3`, mode `0600`. It contains message headers (subjects, addresses); delete it any time or set `TP_IMAP_MCP_CACHE=0`.

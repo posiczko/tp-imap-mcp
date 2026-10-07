@@ -37,6 +37,8 @@ const Ctx = struct {
     arena: Allocator,
     args: ?std.json.ObjectMap,
     problem: []const u8 = "",
+    /// Set by `account()`; lets `mailbox()` resolve names via the cache.
+    idx: ?usize = null,
 
     fn invalid(ctx: *Ctx, comptime fmt: []const u8, a: anytype) Failure {
         ctx.problem = try ctx.arena.print(fmt, a);
@@ -103,7 +105,10 @@ const Ctx = struct {
 
     fn account(ctx: *Ctx) Failure!usize {
         const name = try ctx.string("account");
-        if (ctx.registry.find(name)) |idx| return idx;
+        if (ctx.registry.find(name)) |idx| {
+            ctx.idx = idx;
+            return idx;
+        }
         var names: std.ArrayList(u8) = .empty;
         for (ctx.registry.accounts, 0..) |a, i| {
             if (i > 0) try names.appendSlice(ctx.arena, ", ");
@@ -121,10 +126,14 @@ const Ctx = struct {
     fn mailbox(ctx: *Ctx, key: []const u8, default: ?[]const u8) Failure![:0]const u8 {
         const utf8 = if (default) |d| try ctx.stringOr(key, d) else try ctx.string(key);
         try ctx.check(validate.mailbox(utf8));
-        const wire = mutf7.encode(ctx.arena, utf8) catch |err| switch (err) {
+        const encoded = mutf7.encode(ctx.arena, utf8) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return ctx.invalid("argument \"{s}\" is not valid UTF-8", .{key}),
         };
+        // list_mailboxes shows names with invisible characters removed; map
+        // such a name back to the real one (fresh cache only, no round trip).
+        const boxes = if (ctx.idx) |i| ctx.registry.freshMailboxes(i, ctx.arena) else null;
+        const wire = if (boxes) |b| try resolveMailbox(ctx.arena, b, utf8, encoded) else encoded;
         return ctx.arena.dupeSentinel(u8, wire, 0);
     }
 
@@ -388,6 +397,7 @@ fn headerGroups(arena: Allocator, hs: []const headers.Header, withheld: ?[]const
     var out: HeaderGroups = .{};
     for (hs) |h| {
         if (withheld != null and !filter.isVisibleHeader(h.name)) continue;
+        if (isOwnMarker(h.name)) continue; // a message must not spoof our markers
         if (out.size >= max_bytes) {
             out.omitted += 1;
             continue;
@@ -395,11 +405,11 @@ fn headerGroups(arena: Allocator, hs: []const headers.Header, withheld: ?[]const
         const g = try out.groups.getOrPut(arena, h.name);
         if (!g.found_existing) {
             g.value_ptr.* = .empty;
-            out.size += h.name.len;
+            out.size += limit.jsonLen(h.name);
         }
         const v = try displayValue(arena, h.value);
         try g.value_ptr.append(arena, v);
-        out.size += v.len;
+        out.size += limit.jsonLen(v);
     }
     return out;
 }
@@ -433,6 +443,7 @@ fn headerFieldValues(arena: Allocator, hs: []const headers.Header, field: []cons
         m[0] = try filter.marker(arena, name);
         return m;
     };
+    if (isOwnMarker(field)) return &.{};
     var values: std.ArrayList([]const u8) = .empty;
     for (hs) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, field))
@@ -456,7 +467,7 @@ fn getHeader(ctx: *Ctx) Failure![]const u8 {
         const raw = item.data orelse "";
         const withheld = try withheldBy(ctx.arena, active, raw);
         const hg = try headerGroups(ctx.arena, try headers.parse(ctx.arena, raw), withheld, ctx.registry.settings.max_body_bytes);
-        if (budget.admit(hg.size)) {
+        if (admitItem(&budget, hg.size, withheld)) {
             try writeHeaderObject(&jw, hg, withheld);
         } else {
             jw.write(.{ .@"x-tp-imap-mcp-omitted" = .{limit.omitted_reason} }) catch return error.OutOfMemory;
@@ -479,10 +490,11 @@ fn getHeaderField(ctx: *Ctx) Failure![]const u8 {
             continue;
         };
         const raw = item.data orelse "";
-        const values = try headerFieldValues(ctx.arena, try headers.parse(ctx.arena, raw), field, try withheldBy(ctx.arena, active, raw));
+        const withheld = try withheldBy(ctx.arena, active, raw);
+        const values = try headerFieldValues(ctx.arena, try headers.parse(ctx.arena, raw), field, withheld);
         var size: usize = 0;
-        for (values) |v| size += v.len;
-        o.* = if (budget.admit(size)) values else &.{limit.omitted_text};
+        for (values) |v| size += limit.jsonLen(v);
+        o.* = if (admitItem(&budget, size, withheld)) values else &.{limit.omitted_text};
     }
     return ctx.json(out);
 }
@@ -511,7 +523,7 @@ fn renderBudgeted(ctx: *Ctx, item: *const Fetched, kind: body.Kind, budget: *lim
         error.OutOfMemory => return error.OutOfMemory,
         else => return ctx.failed("UID {d}: message could not be parsed as MIME", .{item.uid}),
     };
-    return if (budget.admit(rendered.len)) rendered else limit.omitted_text;
+    return if (budget.admit(limit.jsonLen(rendered))) rendered else limit.omitted_text;
 }
 
 /// get_text/get_html with active filters: headers first, classify, then fetch
@@ -675,10 +687,27 @@ const CachedHeadersOp = struct {
             } else |e| self.registry.cacheFailed(self.idx, e);
         }
 
+        // Cached headers outlive expunged messages: confirm the hits still
+        // exist (one UID SEARCH) and forget the ones that are gone.
+        var gone: []const u32 = &.{};
+        if (cached.len > 0) {
+            var set: std.ArrayList(u8) = .empty;
+            try set.appendSlice(self.arena, "UID ");
+            for (cached, 0..) |c, i| try set.print(self.arena, "{s}{d}", .{ if (i > 0) "," else "", c.uid });
+            const existing = try s.uidSearch(self.arena, try self.arena.dupeSentinel(u8, set.items, 0));
+            const pruned = try pruneCached(self.arena, cached, existing);
+            if (pruned.gone.len > 0) if (store) |st|
+                st.deleteMessages(self.mailbox, uidvalidity, pruned.gone) catch |e| self.registry.cacheFailed(self.idx, e);
+            cached = pruned.kept;
+            gone = pruned.gone;
+        }
+
         var missing: std.ArrayList(u32) = .empty;
         for (self.uids) |u| {
             for (cached) |c| {
                 if (c.uid == u) break;
+            } else for (gone) |g| {
+                if (g == u) break; // known expunged: do not refetch
             } else try missing.append(self.arena, u);
         }
         var fetched: []Fetched = &.{};
@@ -755,11 +784,55 @@ const AppendOp = struct {
     data: []const u8,
     response: []const u8 = "",
 
+    // APPEND is not idempotent: retrying after a lost connection could save
+    // the draft twice.
+    pub const retry_after_connection_loss = false;
+    pub const connection_lost_message = "connection lost while saving the draft; it may or may not have been saved. Check the Drafts folder before retrying.";
+
     pub fn run(self: *AppendOp, s: *Session) accounts.Error!void {
         try s.append(self.mailbox, self.data);
         self.response = s.lastResponse();
     }
 };
+
+/// Response-budget decision for one item; withheld entries are always kept
+/// (sanitization spec §5.2).
+fn admitItem(budget: *limit.Budget, size: usize, withheld: ?[]const u8) bool {
+    if (withheld != null) return true;
+    return budget.admit(size);
+}
+
+/// True for header names in this server's own `x-tp-imap-mcp-` namespace.
+fn isOwnMarker(name: []const u8) bool {
+    return std.ascii.startsWithIgnoreCase(name, "x-tp-imap-mcp-");
+}
+
+/// Wire name for a `directory` argument: the encoded input when a mailbox has
+/// exactly that name; otherwise a mailbox whose decoded name, after
+/// invisible-character cleaning, equals the input (what list_mailboxes
+/// showed); otherwise the encoded input unchanged.
+fn resolveMailbox(arena: Allocator, boxes: []const imap.Mailbox, utf8: []const u8, encoded: []const u8) Allocator.Error![]const u8 {
+    for (boxes) |b| if (std.mem.eql(u8, b.name, encoded)) return encoded;
+    for (boxes) |b| {
+        const decoded = mutf7.decode(arena, b.name) catch continue;
+        if (std.mem.eql(u8, try unicode.clean(arena, decoded), utf8)) return b.name;
+    }
+    return encoded;
+}
+
+/// Splits cached entries into those the server still has and the UIDs gone.
+fn pruneCached(arena: Allocator, cached: []const Fetched, existing: []const u32) Allocator.Error!struct { kept: []Fetched, gone: []u32 } {
+    var kept: std.ArrayList(Fetched) = .empty;
+    var gone: std.ArrayList(u32) = .empty;
+    for (cached) |c| {
+        if (std.mem.findScalar(u32, existing, c.uid) != null) {
+            try kept.append(arena, c);
+        } else {
+            try gone.append(arena, c.uid);
+        }
+    }
+    return .{ .kept = kept.items, .gone = gone.items };
+}
 
 /// One entry per input UID (duplicates repeat), null where the server
 /// returned nothing for that UID. Several FETCH responses for one UID (e.g.
@@ -801,7 +874,8 @@ test "alignToUids follows input order, repeats duplicates, nulls missing" {
 }
 
 fn testRegistry(accts: []config.Account) !Registry {
-    return Registry.init(testing.allocator, accts, .{ .cache_dir = null, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = config.default_ca_file });
+    const none = [_][]const *const filter.Filter{ &.{}, &.{} };
+    return Registry.init(testing.allocator, accts, .{ .cache_dir = null, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = config.default_ca_file }, &none);
 }
 
 fn testAccounts() [2]config.Account {
@@ -994,4 +1068,53 @@ test "review: bodies are fetched only for UIDs whose headers were seen and passe
     const allowed = try classifyForBodies(a, &active, &.{ 42, 7, 9 }, &fetched, &withheld);
     try testing.expectEqualSlices(u32, &.{7}, allowed);
     try testing.expectEqualStrings("password_reset", withheld.get(42).?);
+}
+
+test "todo: create_message's append is never retried after a dropped connection" {
+    try testing.expect(!accounts.retriesAfterConnectionLoss(AppendOp));
+    try testing.expect(accounts.retriesAfterConnectionLoss(SearchOp));
+}
+
+test "todo: a cleaned mailbox name resolves back to its real wire name" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const boxes = [_]imap.Mailbox{
+        .{ .name = "INBOX", .delimiter = '/', .flags = &.{} },
+        .{ .name = "Fo&IAs-o", .delimiter = '/', .flags = &.{} }, // "Fo\u{200B}o"
+    };
+    try testing.expectEqualStrings("Fo&IAs-o", try resolveMailbox(a, &boxes, "Foo", "Foo"));
+    try testing.expectEqualStrings("INBOX", try resolveMailbox(a, &boxes, "INBOX", "INBOX"));
+    try testing.expectEqualStrings("Other", try resolveMailbox(a, &boxes, "Other", "Other"));
+}
+
+test "todo: cached hits for expunged UIDs are pruned" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const cached = [_]Fetched{
+        .{ .uid = 5, .size = 1, .data = "A: b\r\n\r\n", .flags = null },
+        .{ .uid = 6, .size = 1, .data = "A: c\r\n\r\n", .flags = null },
+    };
+    const r = try pruneCached(a, &cached, &.{6});
+    try testing.expectEqual(1, r.kept.len);
+    try testing.expectEqual(6, r.kept[0].uid);
+    try testing.expectEqualSlices(u32, &.{5}, r.gone);
+}
+
+test "todo: message headers cannot spoof x-tp-imap-mcp markers" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const hs = try headers.parse(a, "Subject: hi\r\nX-TP-IMAP-MCP-Withheld: password_reset\r\n\r\n");
+    const hg = try headerGroups(a, hs, null, 32 * 1024);
+    try testing.expectEqual(1, hg.groups.count());
+    try testing.expectEqual(0, (try headerFieldValues(a, hs, "x-tp-imap-mcp-withheld", null)).len);
+}
+
+test "todo: withheld entries bypass the response budget" {
+    var b: limit.Budget = .init(10);
+    try testing.expect(admitItem(&b, 50, null)); // first item always admitted
+    try testing.expect(admitItem(&b, 50, "password_reset")); // withheld: kept regardless
+    try testing.expect(!admitItem(&b, 50, null));
 }

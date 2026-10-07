@@ -168,7 +168,7 @@ fn errorResponse(arena: Allocator, id: std.json.Value, code: i32, message: []con
 const testing = std.testing;
 
 fn roundTrip(input: []const u8) ![]u8 {
-    var reg: Registry = try .init(testing.allocator, &.{}, .{ .cache_dir = null, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = @import("config.zig").default_ca_file });
+    var reg: Registry = try .init(testing.allocator, &.{}, .{ .cache_dir = null, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = @import("config.zig").default_ca_file }, &.{});
     defer reg.deinit();
     var in: std.Io.Reader = .fixed(input);
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -273,7 +273,7 @@ test "tool text with invalid UTF-8 is still a JSON string" {
         .name = "a", .host = "h", .port = 993, .login = "caf\xe9", .password = @constCast(&[_:0]u8{}),
         .readonly = false, .drafts = null,
     }};
-    var reg: Registry = try .init(testing.allocator, &accounts, .{ .cache_dir = null, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = @import("config.zig").default_ca_file });
+    var reg: Registry = try .init(testing.allocator, &accounts, .{ .cache_dir = null, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = @import("config.zig").default_ca_file }, &.{&.{}});
     defer reg.deinit();
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();

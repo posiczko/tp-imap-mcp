@@ -24,9 +24,9 @@ pub const Registry = struct {
     accounts: []config.Account,
     settings: config.Settings,
     slots: []Slot,
-    /// Active sensitive-content filters per account (ADR 0017); set by main
-    /// after loading filters. Empty means no filtering.
-    active_filters: []const []const *const Filter = &.{},
+    /// Active sensitive-content filters per account (ADR 0017), one entry per
+    /// account. Required at init so filtering can never be silently off.
+    active_filters: []const []const *const Filter,
     /// Human-readable cause of the most recent failure (no secrets).
     diag_buf: [512]u8 = undefined,
     diag_len: usize = 0,
@@ -36,19 +36,27 @@ pub const Registry = struct {
     const Slot = struct {
         session: ?Session = null,
         drafts: ?[:0]u8 = null, // wire-encoded, owned by gpa
+        cache_path: ?[:0]u8 = null, // owned by gpa; set when the cache is opened
         cache: CacheState = .unopened,
     };
 
-    pub fn init(gpa: Allocator, accounts: []config.Account, settings: config.Settings) Allocator.Error!Registry {
+    pub fn init(
+        gpa: Allocator,
+        accounts: []config.Account,
+        settings: config.Settings,
+        active_filters: []const []const *const Filter,
+    ) (Allocator.Error || error{FilterCountMismatch})!Registry {
+        if (active_filters.len != accounts.len) return error.FilterCountMismatch;
         const slots = try gpa.alloc(Slot, accounts.len);
         @memset(slots, .{});
-        return .{ .gpa = gpa, .accounts = accounts, .settings = settings, .slots = slots };
+        return .{ .gpa = gpa, .accounts = accounts, .settings = settings, .slots = slots, .active_filters = active_filters };
     }
 
     pub fn deinit(self: *Registry) void {
         for (self.slots, self.accounts) |*slot, *account| {
             if (slot.session) |*s| s.close();
             if (slot.drafts) |d| self.gpa.free(d);
+            if (slot.cache_path) |cp| self.gpa.free(cp);
             switch (slot.cache) {
                 .open => |*store| store.close(),
                 else => {},
@@ -65,7 +73,7 @@ pub const Registry = struct {
     }
 
     pub fn filtersFor(self: *const Registry, idx: usize) []const *const Filter {
-        return if (idx < self.active_filters.len) self.active_filters[idx] else &.{};
+        return self.active_filters[idx];
     }
 
     pub fn diag(self: *const Registry) []const u8 {
@@ -97,6 +105,11 @@ pub const Registry = struct {
             } else |err| switch (err) {
                 error.ConnectionLost => {
                     self.drop(idx);
+                    const Op = @typeInfo(@TypeOf(op)).pointer.child;
+                    if (comptime !retriesAfterConnectionLoss(Op)) {
+                        self.setDiag("account \"{s}\": {s}", .{ self.accounts[idx].name, Op.connection_lost_message });
+                        return err;
+                    }
                     if (attempt == 0) continue;
                     self.setDiag("account \"{s}\": connection lost twice; giving up", .{self.accounts[idx].name});
                     return err;
@@ -165,7 +178,8 @@ pub const Registry = struct {
         }
         slot.cache = .disabled;
         const dir = self.settings.cache_dir orelse return null;
-        const store = openCache(self.gpa, dir, self.accounts[idx].name) catch |err| {
+        if (slot.cache_path == null) slot.cache_path = cachePath(self.gpa, dir, self.accounts[idx].name) catch return null;
+        const store = openCache(self.gpa, dir, slot.cache_path.?) catch |err| {
             log.warn("account \"{s}\": cache unavailable ({t}); continuing without it", .{ self.accounts[idx].name, err });
             return null;
         };
@@ -182,6 +196,9 @@ pub const Registry = struct {
             else => {},
         }
         slot.cache = .disabled;
+        // Corruption found during use: delete the files so the next start
+        // rebuilds the cache instead of failing on it every time.
+        if (err == error.SqliteCorrupt) if (slot.cache_path) |cp| deleteCacheFiles(cp);
     }
 
     /// Deletes all cached rows for the account. False if caching is off.
@@ -211,6 +228,14 @@ pub const Registry = struct {
         return op.result;
     }
 
+    /// The cached mailbox list if it is fresh; never contacts the server.
+    pub fn freshMailboxes(self: *Registry, idx: usize, arena: Allocator) ?[]imap.Mailbox {
+        const store = self.cache(idx) orelse return null;
+        const fresh = store.mailboxesFresh(self.settings.mailbox_ttl) catch |e| return self.cacheMiss(idx, e);
+        if (!fresh) return null;
+        return store.loadMailboxes(arena) catch |e| self.cacheMiss(idx, e);
+    }
+
     fn cacheMiss(self: *Registry, idx: usize, err: anyerror) ?[]imap.Mailbox {
         self.cacheFailed(idx, err);
         return null;
@@ -237,6 +262,13 @@ pub const Registry = struct {
     }
 };
 
+/// Operations are retried once after a dropped connection unless they declare
+/// `pub const retry_after_connection_loss = false;` (non-idempotent commands
+/// such as APPEND), together with a `connection_lost_message`.
+pub fn retriesAfterConnectionLoss(comptime Op: type) bool {
+    return !@hasDecl(Op, "retry_after_connection_loss") or Op.retry_after_connection_loss;
+}
+
 const ListAll = struct {
     arena: Allocator,
     result: []imap.Mailbox = &.{},
@@ -249,19 +281,30 @@ const ListAll = struct {
 /// Creates `dir` (mode 0700) and opens `<dir>/<account>.sqlite3` with a
 /// 0077 umask so the database and its WAL files are private. A corrupt file is
 /// deleted and recreated once.
-fn openCache(gpa: Allocator, dir: []const u8, account: []const u8) !Store {
-    try makePath(gpa, dir);
+fn cachePath(gpa: Allocator, dir: []const u8, account: []const u8) ![:0]u8 {
     const lower = try std.ascii.allocLowerString(gpa, account);
     defer gpa.free(lower);
-    const path = try gpa.printSentinel("{s}/{s}.sqlite3", .{ dir, lower }, 0);
-    defer gpa.free(path);
+    return gpa.printSentinel("{s}/{s}.sqlite3", .{ dir, lower }, 0);
+}
 
+/// Removes the database and its WAL companions (best effort).
+fn deleteCacheFiles(path: [:0]const u8) void {
+    _ = std.c.unlink(path);
+    var buf: [std.fs.max_path_bytes + 8]u8 = undefined;
+    for ([_][]const u8{ "-wal", "-shm" }) |suffix| {
+        const p = std.mem.printSentinel(&buf, "{s}{s}", .{ path, suffix }, 0) catch continue;
+        _ = std.c.unlink(p);
+    }
+}
+
+fn openCache(gpa: Allocator, dir: []const u8, path: [:0]const u8) !Store {
+    try makePath(gpa, dir);
     const old_mask = std.c.umask(0o077);
     defer _ = std.c.umask(old_mask);
     return Store.open(path) catch |err| switch (err) {
         error.SqliteCorrupt => {
             log.warn("cache file {s} is corrupt; rebuilding", .{path});
-            _ = std.c.unlink(path);
+            deleteCacheFiles(path);
             return Store.open(path);
         },
         else => return err,
@@ -297,6 +340,7 @@ const Noop = struct {
 };
 
 const no_cache: config.Settings = .{ .cache_dir = null, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = config.default_ca_file };
+const no_filters_1 = [_][]const *const Filter{&.{}};
 
 fn localAccount(password: [:0]u8, drafts_name: ?[]const u8) config.Account {
     return .{
@@ -314,7 +358,7 @@ test "unreachable server reports a connect diagnostic without the password" {
     const pw = try testing.allocator.dupeSentinel(u8, "s3cret", 0);
     defer testing.allocator.free(pw);
     var accounts = [_]config.Account{localAccount(pw, null)};
-    var reg: Registry = try .init(testing.allocator, &accounts, no_cache);
+    var reg: Registry = try .init(testing.allocator, &accounts, no_cache, &no_filters_1);
     defer reg.deinit();
 
     try testing.expectEqual(0, reg.find("LOCAL").?);
@@ -330,7 +374,7 @@ test "configured drafts override is encoded without contacting the server" {
     const pw = try testing.allocator.dupeSentinel(u8, "x", 0);
     defer testing.allocator.free(pw);
     var accounts = [_]config.Account{localAccount(pw, "Entwürfe")};
-    var reg: Registry = try .init(testing.allocator, &accounts, no_cache);
+    var reg: Registry = try .init(testing.allocator, &accounts, no_cache, &no_filters_1);
     defer reg.deinit();
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
@@ -346,7 +390,7 @@ test "fresh cached mailbox list is served without the server; clearCache empties
     const pw = try testing.allocator.dupeSentinel(u8, "x", 0);
     defer testing.allocator.free(pw);
     var accounts = [_]config.Account{localAccount(pw, null)};
-    var reg: Registry = try .init(testing.allocator, &accounts, .{ .cache_dir = dir, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = config.default_ca_file });
+    var reg: Registry = try .init(testing.allocator, &accounts, .{ .cache_dir = dir, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = config.default_ca_file }, &no_filters_1);
     defer reg.deinit();
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
@@ -381,7 +425,7 @@ test "corrupt cache file is rebuilt" {
     const pw = try testing.allocator.dupeSentinel(u8, "x", 0);
     defer testing.allocator.free(pw);
     var accounts = [_]config.Account{localAccount(pw, null)};
-    var reg: Registry = try .init(testing.allocator, &accounts, .{ .cache_dir = dir, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = config.default_ca_file });
+    var reg: Registry = try .init(testing.allocator, &accounts, .{ .cache_dir = dir, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = config.default_ca_file }, &no_filters_1);
     defer reg.deinit();
     try testing.expect(reg.cache(0) != null);
 }
@@ -390,8 +434,35 @@ test "caching disabled: no store, clearCache reports false" {
     const pw = try testing.allocator.dupeSentinel(u8, "x", 0);
     defer testing.allocator.free(pw);
     var accounts = [_]config.Account{localAccount(pw, null)};
-    var reg: Registry = try .init(testing.allocator, &accounts, no_cache);
+    var reg: Registry = try .init(testing.allocator, &accounts, no_cache, &no_filters_1);
     defer reg.deinit();
     try testing.expect(reg.cache(0) == null);
     try testing.expect(!reg.clearCache(0));
+}
+
+test "todo: active filters are required and must match the account count" {
+    const pw = try testing.allocator.dupeSentinel(u8, "x", 0);
+    defer testing.allocator.free(pw);
+    var accounts = [_]config.Account{localAccount(pw, null)};
+    try testing.expectError(error.FilterCountMismatch, Registry.init(testing.allocator, &accounts, no_cache, &.{}));
+}
+
+test "todo: a cache found corrupt during use is deleted (with -wal/-shm) for rebuild" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try testing.allocator.print(".zig-cache/tmp/{s}", .{&tmp.sub_path});
+    defer testing.allocator.free(dir);
+    const pw = try testing.allocator.dupeSentinel(u8, "x", 0);
+    defer testing.allocator.free(pw);
+    var accounts = [_]config.Account{localAccount(pw, null)};
+    var reg: Registry = try .init(testing.allocator, &accounts, .{ .cache_dir = dir, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = config.default_ca_file }, &no_filters_1);
+    defer reg.deinit();
+    try testing.expect(reg.cache(0) != null);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "local.sqlite3-wal", .data = "x" });
+    testing.log_level = .err;
+    defer testing.log_level = .warn;
+    reg.cacheFailed(0, error.SqliteCorrupt);
+    for ([_][]const u8{ "local.sqlite3", "local.sqlite3-wal", "local.sqlite3-shm" }) |name| {
+        try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, name, .{}));
+    }
 }

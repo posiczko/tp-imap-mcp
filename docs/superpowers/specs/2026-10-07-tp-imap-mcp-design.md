@@ -129,8 +129,11 @@ Rules:
   empty, a name is invalid or duplicated, a required variable is missing or
   empty, or `PORT`/`READONLY`/`TP_IMAP_MCP_CACHE`/`TP_IMAP_MCP_MAILBOX_TTL` is
   malformed. Messages name the variable, never the value.
-- Passwords live only in process memory, are zeroed (`std.crypto.secureZero`)
-  on shutdown, and never appear in logs, errors, or tool output.
+- Passwords live only in process memory and never appear in logs, errors,
+  or tool output. The server's own copy (`Account.password`) is zeroed
+  (`std.crypto.secureZero`) on shutdown. Copies it does not own are not
+  wiped: the process environment block that `op run` provides (inherent to
+  environment injection, ADR 0007) and libetpan's internal network buffers.
 - Startup fails if the CA bundle is not readable.
 - Startup logs the account count and the cache directory (or "off") to stderr.
 - Example MCP client registration:
@@ -150,6 +153,8 @@ Rules:
 - Before each tool call: `NOOP`. On failure, or on a stream error during the
   call, discard the session, reconnect + login once, and retry the call once.
   A second failure is returned as a tool error naming the account.
+  Exception: `APPEND` (`create_message`) is not retried — a retry could save
+  the draft twice; the error says the draft may or may not have been saved.
 - Login failure affects only that account; the server keeps running.
 - Socket timeout: 60 s (`mailimap_set_timeout`).
 - Mailbox opening per call:
@@ -404,3 +409,12 @@ file that is not a valid database is deleted and recreated once.
 
 **Privacy.** Cached headers contain subjects and addresses; the file is
 readable only by the user.
+
+## 12. Cleanup notes (2026-10-07)
+
+- Cache hits for `get_header`/`get_header_field`/`get_size` are confirmed
+  with one `UID SEARCH UID <hits>`; expunged UIDs return `null` and their
+  rows are deleted.
+- A `directory` argument that matches no mailbox exactly is resolved against
+  the fresh cached mailbox list by its invisible-character-cleaned name.
+- `Registry.init` takes the per-account active filters (required).

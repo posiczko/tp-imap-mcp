@@ -7,6 +7,7 @@ const Allocator = std.mem.Allocator;
 
 pub const Error = error{
     CriteriaHasControlChars,
+    CriteriaEndsWithLiteral,
     EmptyUids,
     InvalidUid,
     EmptyKeywords,
@@ -18,6 +19,7 @@ pub const Error = error{
 pub fn message(err: Error) []const u8 {
     return switch (err) {
         error.CriteriaHasControlChars => "criteria must not contain CR, LF, or NUL",
+        error.CriteriaEndsWithLiteral => "criteria must not end with an IMAP literal marker like {5}",
         error.EmptyUids => "uids must be a non-empty array",
         error.InvalidUid => "each uid must be a decimal string between 1 and 4294967295",
         error.EmptyKeywords => "keywords must be a non-empty array",
@@ -30,6 +32,20 @@ pub fn message(err: Error) []const u8 {
 
 pub fn criteria(s: []const u8) Error!void {
     if (std.mem.findAny(u8, s, "\r\n\x00") != null) return error.CriteriaHasControlChars;
+    // `{N}` / `{N+}` at the very end would announce an IMAP literal; today
+    // libetpan's trailing space defuses it, but do not rely on that.
+    const t = std.mem.trimEnd(u8, s, " \t");
+    if (t.len > 0 and t[t.len - 1] == '}') {
+        if (std.mem.findScalarLast(u8, t, '{')) |open| {
+            var inner = t[open + 1 .. t.len - 1];
+            if (inner.len > 0 and inner[inner.len - 1] == '+') inner = inner[0 .. inner.len - 1];
+            if (inner.len > 0) {
+                for (inner) |ch| {
+                    if (!std.ascii.isDigit(ch)) break;
+                } else return error.CriteriaEndsWithLiteral;
+            }
+        }
+    }
 }
 
 /// Parses decimal UID strings. The result is owned by `gpa`.
@@ -121,4 +137,11 @@ test "field accepts header names only" {
 test "mailbox rejects NUL" {
     try mailbox("INBOX/Archives");
     try testing.expectError(error.MailboxHasNul, mailbox("IN\x00BOX"));
+}
+
+test "todo: criteria cannot end in an IMAP literal marker" {
+    try testing.expectError(error.CriteriaEndsWithLiteral, criteria("SUBJECT {5}"));
+    try testing.expectError(error.CriteriaEndsWithLiteral, criteria("SUBJECT {12+}  "));
+    try criteria("SUBJECT \"{5}\" FROM x"); // braces elsewhere are fine
+    try criteria("SUBJECT {x}");
 }

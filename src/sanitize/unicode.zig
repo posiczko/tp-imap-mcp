@@ -46,11 +46,15 @@ pub fn clean(arena: Allocator, text: []const u8) Allocator.Error![]const u8 {
 
 /// Allocation-free variant for fixed buffers: writes the cleaned text into
 /// `buf` (truncating at a code-point boundary) and returns the written slice.
+/// Invalid UTF-8 (e.g. raw server text) becomes U+FFFD instead of being lost.
 pub fn cleanInto(buf: []u8, text: []const u8) []const u8 {
     var n: usize = 0;
-    var view = std.unicode.Utf8View.init(text) catch return "";
-    var it = view.iterator();
-    while (it.nextCodepointSlice()) |slice| {
+    var i: usize = 0;
+    while (i < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 0;
+        const valid = len > 0 and i + len <= text.len and std.unicode.utf8ValidateSlice(text[i .. i + len]);
+        const slice: []const u8 = if (valid) text[i .. i + len] else "\u{FFFD}";
+        i += if (valid) len else 1;
         const cp = std.unicode.utf8Decode(slice) catch unreachable;
         const piece: []const u8 = if (cp == 0x2028 or cp == 0x2029) "\n" else if (removed(cp)) "" else slice;
         if (n + piece.len > buf.len) break;
@@ -87,4 +91,9 @@ test "cleanInto respects the buffer and code-point boundaries" {
     var buf: [5]u8 = undefined;
     try testing.expectEqualStrings("ab", cleanInto(&buf, "a\u{200B}b"));
     try testing.expectEqualStrings("abc\u{e9}", cleanInto(&buf, "abc\u{e9}\u{e9}")); // second é would not fit whole
+}
+
+test "todo: cleanInto keeps text around invalid UTF-8" {
+    var buf: [16]u8 = undefined;
+    try testing.expectEqualStrings("a\u{FFFD}b", cleanInto(&buf, "a\xffb"));
 }

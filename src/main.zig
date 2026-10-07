@@ -45,9 +45,8 @@ pub fn main(init: std.process.Init) !u8 {
     try stderr.writeAll("\n");
     try stderr.flush();
 
-    var registry: Registry = try .init(init.gpa, accounts, settings);
+    var registry: Registry = try .init(init.gpa, accounts, settings, active_filters);
     defer registry.deinit();
-    registry.active_filters = active_filters;
 
     var in_buf: [64 * 1024]u8 = undefined;
     var stdin_reader = std.Io.File.stdin().reader(init.io, &in_buf);

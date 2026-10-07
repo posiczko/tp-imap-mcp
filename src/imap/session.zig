@@ -229,6 +229,9 @@ pub fn decodeHeaderValue(arena: Allocator, raw: []const u8) Allocator.Error![]co
     if (c.tpi_decode_header_value(raw.ptr, raw.len, &out, &out_len) != c.OK) return raw;
     defer c.tpi_buf_free(out);
     const o = out orelse return raw;
+    // An encoded NUL truncates libetpan's C string; never turn a non-empty
+    // value into an empty one (filters would then see nothing).
+    if (out_len == 0 and std.mem.trim(u8, raw, " \t").len > 0) return raw;
     return arena.dupe(u8, o[0..out_len]);
 }
 
@@ -260,4 +263,11 @@ test "decodeHeaderValue decodes RFC 2047 B and Q words, leaves plain text alone"
     try testing.expectEqualStrings("R\u{e9}initialiser", try decodeHeaderValue(a, "=?ISO-8859-1?Q?R=E9initialiser?="));
     try testing.expectEqualStrings("Reset your password", try decodeHeaderValue(a, "=?UTF-8?Q?Reset_?= =?UTF-8?Q?your_password?="));
     try testing.expectEqualStrings("Plain subject", try decodeHeaderValue(a, "Plain subject"));
+}
+
+test "todo: a decode that comes out empty falls back to the raw value" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const raw = "=?UTF-8?B?AFJlc2V0IHlvdXIgcGFzc3dvcmQ=?=";
+    try testing.expectEqualStrings(raw, try decodeHeaderValue(arena_state.allocator(), raw));
 }

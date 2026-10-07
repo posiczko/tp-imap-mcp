@@ -147,6 +147,18 @@ pub const Store = struct {
         try self.db.exec("COMMIT");
     }
 
+    /// Removes rows for UIDs the server no longer has (expunged).
+    pub fn deleteMessages(self: *Store, mailbox: []const u8, uidvalidity: u32, uids: []const u32) Error!void {
+        const q = try self.db.prepare("DELETE FROM messages WHERE mailbox = ?1 AND uidvalidity = ?2 AND uid = ?3");
+        defer q.finalize();
+        for (uids) |uid| {
+            try q.bindText(1, mailbox);
+            try q.bindInt(2, uidvalidity);
+            try q.bindInt(3, uid);
+            try q.run();
+        }
+    }
+
     pub fn clear(self: *Store) Error!void {
         try self.db.exec("BEGIN IMMEDIATE; DELETE FROM messages; DELETE FROM mailboxes; DELETE FROM meta; COMMIT;");
     }
@@ -210,6 +222,22 @@ test "messages: hit, miss, UIDVALIDITY change, vanished mailbox, clear" {
     try s.clear();
     try testing.expectEqual(0, (try s.getMessages(a, "INBOX", 8, &.{1})).len);
     try testing.expectEqual(0, (try s.loadMailboxes(a)).len);
+}
+
+test "todo: deleteMessages removes only the named UIDs" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var s: Store = try .open(":memory:");
+    defer s.close();
+    try s.putMessages("INBOX", 7, &.{
+        .{ .uid = 1, .size = 1, .data = "A: b\r\n\r\n", .flags = null },
+        .{ .uid = 2, .size = 1, .data = "A: c\r\n\r\n", .flags = null },
+    });
+    try s.deleteMessages("INBOX", 7, &.{1});
+    const left = try s.getMessages(a, "INBOX", 7, &.{ 1, 2 });
+    try testing.expectEqual(1, left.len);
+    try testing.expectEqual(2, left[0].uid);
 }
 
 test "schema version mismatch rebuilds the file" {

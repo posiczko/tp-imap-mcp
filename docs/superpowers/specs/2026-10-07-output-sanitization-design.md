@@ -255,3 +255,10 @@ No new dependencies; no new C files (the MIME change extends `mime.c`).
 - The encrypted-message marker's `protocol` parameter is cleaned and limited
   to 64 bytes.
 - Live checks re-run after the fix pass: 26/26.
+- Live markup check (itest) applies to `get_html` only: a `text/plain`
+  alternative may contain raw HTML written by the sender, returned verbatim as
+  inert text (observed on the user's server, 2026-10-07). Invisible-character
+  checks apply to both tools.
+- Cleanup (2026-10-07): `noembed`/`noframes` are raw-text dropped elements;
+  `datalist` and `dialog` without `open` are dropped; withheld entries bypass
+  the response budget; `x-tp-imap-mcp-*` message headers are not shown.

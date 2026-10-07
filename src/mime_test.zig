@@ -83,3 +83,7 @@ test "review: the encrypted marker's protocol parameter is cleaned and capped" {
     try testing.expect(std.mem.find(u8, got, "\u{200B}") == null);
     try testing.expect(got.len < 200);
 }
+
+test "todo: an embedded NUL after charset conversion does not truncate the body" {
+    try expectBody("latin1_nul.eml", .plain, "beforeafter\n"); // QP keeps the final line break
+}

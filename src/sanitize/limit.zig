@@ -17,6 +17,18 @@ pub fn truncate(arena: Allocator, text: []const u8, max: usize) Allocator.Error!
     return arena.print("{s}\n[truncated: {d} bytes omitted]", .{ kept, text.len - kept.len });
 }
 
+/// Bytes `s` occupies inside a JSON string (std.json escaping): `"` and `\`
+/// take 2, control characters 2 (`\n`-style) or 6 (`\u00XX`), UTF-8 as is.
+pub fn jsonLen(s: []const u8) usize {
+    var n: usize = 0;
+    for (s) |ch| n += switch (ch) {
+        '"', '\\', '\n', '\r', '\t', 0x08, 0x0C => 2,
+        0x00...0x07, 0x0B, 0x0E...0x1F => 6,
+        else => 1,
+    };
+    return n;
+}
+
 /// Running per-response budget. The first item is always admitted; after
 /// that, an item that would exceed the budget is refused, and so is every
 /// later item.
@@ -62,4 +74,12 @@ test "budget admits the first item, then refuses everything after the first over
     try testing.expect(c.admit(6));
     try testing.expect(!c.admit(1));
     try testing.expect(!c.admit(0)); // stays exhausted
+}
+
+test "todo: jsonLen counts JSON-escaped bytes" {
+    try testing.expectEqual(3, jsonLen("abc"));
+    try testing.expectEqual(4, jsonLen("\"\\"));
+    try testing.expectEqual(2, jsonLen("\n"));
+    try testing.expectEqual(6, jsonLen("\x01"));
+    try testing.expectEqual(2, jsonLen("\u{e9}")); // UTF-8 passes through unescaped
 }
