@@ -352,9 +352,11 @@ pub const move_messages =
     \\
     \\Return:
     \\    {"moved": 3, "source": "INBOX", "destination": "Receipts/2026",
-    \\     "uid_map": [{"from": "101", "to": "7"}, ...], "note": null}
+    \\     "uid_map": [{"from": "101", "to": "7"}, ...], "uid_map_omitted": null,
+    \\     "note": null}
     \\    uid_map gives the messages' new UIDs in the destination (null if the
-    \\    server does not report them). A dry run returns
+    \\    server does not report them): the first 100 pairs, with
+    \\    uid_map_omitted counting the rest. A dry run returns
     \\    {"dry_run": true, "matched": 42, "uids": [...], ...}.
     \\
     \\Notes:
@@ -374,7 +376,9 @@ pub const copy_messages =
     \\
     \\Return:
     \\    {"copied": 3, "source": "INBOX", "destination": "Receipts/2026",
-    \\     "uid_map": [{"from": "101", "to": "7"}, ...], "note": null}
+    \\     "uid_map": [{"from": "101", "to": "7"}, ...], "uid_map_omitted": null,
+    \\     "note": null}
+    \\    uid_map lists the first 100 pairs; uid_map_omitted counts the rest.
     \\
     \\Notes:
     \\    On Gmail, copying adds the destination label; the message stays

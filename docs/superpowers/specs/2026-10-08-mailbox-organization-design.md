@@ -56,12 +56,14 @@ All take `account`. All are refused on read-only accounts
 ```json
 {"moved":3,"source":"INBOX","destination":"Receipts/2026",
  "uid_map":[{"from":"101","to":"7"},{"from":"102","to":"8"},{"from":"105","to":"9"}],
- "note":null}
+ "uid_map_omitted":null,"note":null}
 ```
 
 - `copy_messages` reports `"copied"` instead of `"moved"`.
 - `uid_map` is present when the server reports COPYUID (UIDPLUS; Gmail and
-  Dovecot do), else `null`.
+  Dovecot do), else `null`. It lists at most the first 100 pairs;
+  `uid_map_omitted` counts the rest (`null` when none were left out), so a
+  5000-message move stays small (a 4,746-message move returned 134 KB before).
 - `note` is set when the destination has the `\Trash` or `\Junk` special-use
   flag: `"destination is the Trash folder; servers may purge it automatically
   (Gmail: after 30 days)"` (resp. Junk/spam).

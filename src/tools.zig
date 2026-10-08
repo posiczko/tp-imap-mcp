@@ -972,13 +972,16 @@ fn transfer(ctx: *Ctx, move: bool) Failure![]const u8 {
         return ctx.json(.{ .dry_run = true, .matched = op.matched.len, .uids = strs, .source = source_shown, .destination = dest_shown, .note = note });
     }
     var uid_map: ?[]UidPairJson = null;
+    var uid_map_omitted: ?usize = null;
     if (op.progress.map_complete and op.progress.pairs.items.len > 0) {
-        const m = try ctx.arena.alloc(UidPairJson, op.progress.pairs.items.len);
-        for (op.progress.pairs.items, m) |pair, *o| o.* = .{ .from = try ctx.arena.print("{d}", .{pair.from}), .to = try ctx.arena.print("{d}", .{pair.to}) };
+        const preview = organize.uidMapPreview(op.progress.pairs.items);
+        const m = try ctx.arena.alloc(UidPairJson, preview.shown.len);
+        for (preview.shown, m) |pair, *o| o.* = .{ .from = try ctx.arena.print("{d}", .{pair.from}), .to = try ctx.arena.print("{d}", .{pair.to}) };
         uid_map = m;
+        if (preview.omitted > 0) uid_map_omitted = preview.omitted;
     }
-    if (move) return ctx.json(.{ .moved = op.progress.done, .source = source_shown, .destination = dest_shown, .uid_map = uid_map, .note = note });
-    return ctx.json(.{ .copied = op.progress.done, .source = source_shown, .destination = dest_shown, .uid_map = uid_map, .note = note });
+    if (move) return ctx.json(.{ .moved = op.progress.done, .source = source_shown, .destination = dest_shown, .uid_map = uid_map, .uid_map_omitted = uid_map_omitted, .note = note });
+    return ctx.json(.{ .copied = op.progress.done, .source = source_shown, .destination = dest_shown, .uid_map = uid_map, .uid_map_omitted = uid_map_omitted, .note = note });
 }
 
 /// First value of header `name`, decoded and sanitized; "" when absent.

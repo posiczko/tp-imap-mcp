@@ -45,11 +45,10 @@
 
 ## From live use (2026-10-08)
 
-- [ ] **Large results overflow the client.** One 4,746-message
-  `move_messages` returned 134 KB (almost all `uid_map`); `list_mailboxes "*"`
-  on ~600 folders 54 KB; `organize_mailbox` with `limit=50` 57 KB. *Fix:* cap
-  `uid_map` like the dry-run preview (count + first N pairs) and keep these
-  results under the response budget.
+- [ ] **Large results overflow the client.** `list_mailboxes "*"` on ~600
+  folders returned 54 KB and `organize_mailbox` with `limit=50` 57 KB, over
+  what Claude Code accepts inline (the 128 KiB response budget is higher).
+  *Fix:* a smaller budget for these, or terser output. (`uid_map` is done.)
 - [ ] **No bulk folder status.** `mailboxes_status` takes one folder, so
   auditing 184 folders took ~600 calls. *Fix:* accept several folders or a
   LIST pattern and return counts for each.
@@ -68,6 +67,7 @@
 - [x] STORE uses `+FLAGS.SILENT` / `-FLAGS.SILENT` (callers re-fetch flags).
 - [x] `create_missing` creates the destination only when something matches; the note says so otherwise.
 - [x] `delete_mailbox` description notes that on Gmail it removes the label.
+- [x] Move/copy results list at most 100 `uid_map` pairs; `uid_map_omitted` counts the rest (a 4,746-message move returned 134 KB).
 
 ## Done (2026-10-07 cleanup)
 

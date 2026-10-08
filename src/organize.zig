@@ -13,6 +13,9 @@ pub const max_messages = 5000;
 pub const batch_size = 500;
 /// UIDs listed in a dry-run result.
 pub const dry_run_preview = 100;
+/// UID pairs listed in a move/copy result; the rest are only counted, so a
+/// 5000-message move stays small.
+pub const uid_map_preview = 100;
 
 /// RFC 6154 special-use attributes, plus Gmail's \Important.
 pub const special_use = [_][]const u8{ "\\All", "\\Archive", "\\Drafts", "\\Flagged", "\\Junk", "\\Sent", "\\Trash", "\\Important" };
@@ -231,6 +234,14 @@ pub fn uidMap(arena: Allocator, cu: ?imap.CopyUid) Allocator.Error!?[]UidPair {
     return out;
 }
 
+pub const UidMapPreview = struct { shown: []const UidPair, omitted: usize };
+
+/// The first `uid_map_preview` pairs, and how many more there are.
+pub fn uidMapPreview(pairs: []const UidPair) UidMapPreview {
+    const n = @min(pairs.len, uid_map_preview);
+    return .{ .shown = pairs[0..n], .omitted = pairs.len - n };
+}
+
 const testing = std.testing;
 
 fn mbox(name: []const u8, flags: []const []const u8) imap.Mailbox {
@@ -339,6 +350,21 @@ test "uidMap pairs COPYUID ranges and rejects malformed data" {
     try testing.expect((try uidMap(a, .{ .uidvalidity = 7, .src = &.{.{ 1, 0 }}, .dst = &.{.{ 5, 0 }} })) == null); // "*"
     try testing.expect((try uidMap(a, .{ .uidvalidity = 7, .src = &.{.{ 1, 4294967295 }}, .dst = &.{.{ 1, 4294967295 }} })) == null); // unbounded
     try testing.expect((try uidMap(a, .{ .uidvalidity = 7, .src = &.{}, .dst = &.{} })) == null);
+}
+
+test "uidMapPreview lists the first pairs and counts the rest" {
+    var pairs: [uid_map_preview + 1]UidPair = undefined;
+    for (&pairs, 1..) |*p, i| p.* = .{ .from = @intCast(i), .to = @intCast(i + 1000) };
+    const small = uidMapPreview(pairs[0..3]);
+    try testing.expectEqual(3, small.shown.len);
+    try testing.expectEqual(0, small.omitted);
+    const exact = uidMapPreview(pairs[0..uid_map_preview]);
+    try testing.expectEqual(uid_map_preview, exact.shown.len);
+    try testing.expectEqual(0, exact.omitted);
+    const big = uidMapPreview(&pairs);
+    try testing.expectEqual(uid_map_preview, big.shown.len);
+    try testing.expectEqual(1, big.omitted);
+    try testing.expectEqual(UidPair{ .from = 1, .to = 1001 }, big.shown[0]);
 }
 
 test "review: sameMailbox treats INBOX case-insensitively and other names exactly" {
