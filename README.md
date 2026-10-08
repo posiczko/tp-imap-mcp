@@ -507,6 +507,8 @@ docs/
 ```bash
 zig build test                                        # unit tests (offline)
 op run --env-file imap.env -- zig build itest -- work # live read-only checks against an account
+zig build clean                                       # remove zig-out (rebuild before the MCP client restarts)
+rm -rf .zig-cache                                     # also drop the build cache, if needed
 ```
 
 The live checks print only PASS/FAIL lines and use a throwaway cache in `.zig-cache/`.
