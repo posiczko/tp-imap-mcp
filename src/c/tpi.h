@@ -97,6 +97,41 @@ int tpi_uid_store_flags(tpi_session *s, const uint32_t *uids, size_t uid_count, 
 
 int tpi_append(tpi_session *s, const char *mailbox, const char *data, size_t len);
 
+/* Mailbox management (ADR 0021). Names are wire (modified UTF-7), validated. */
+int tpi_create(tpi_session *s, const char *mailbox);
+int tpi_rename(tpi_session *s, const char *from, const char *to);
+int tpi_delete(tpi_session *s, const char *mailbox);
+int tpi_subscribe(tpi_session *s, const char *mailbox);
+int tpi_unsubscribe(tpi_session *s, const char *mailbox);
+
+enum {
+  TPI_CAP_MOVE = 1,    /* RFC 6851 */
+  TPI_CAP_UIDPLUS = 2, /* RFC 4315 */
+};
+
+/* Bit mask of TPI_CAP_* from a CAPABILITY command, sent once per session. */
+int tpi_capabilities(tpi_session *s, int *caps);
+
+/* COPYUID response code (UIDPLUS). Ranges are (first, last) pairs, so each
+ * length is twice the number of ranges; a last of 0 stands for "*".
+ * uidvalidity is 0 and both arrays NULL when the server sent none. */
+typedef struct {
+  uint32_t uidvalidity;
+  uint32_t *src;
+  size_t src_len;
+  uint32_t *dst;
+  size_t dst_len;
+} tpi_copyuid;
+
+/* UID MOVE (move != 0) or UID COPY of uids from the selected mailbox to
+ * mailbox. *out is filled on success; release it with tpi_copyuid_free. */
+int tpi_uid_transfer(tpi_session *s, const uint32_t *uids, size_t uid_count,
+                     const char *mailbox, int move, tpi_copyuid *out);
+void tpi_copyuid_free(tpi_copyuid *c);
+
+/* UID EXPUNGE (UIDPLUS): expunges only these UIDs, if flagged \Deleted. */
+int tpi_uid_expunge(tpi_session *s, const uint32_t *uids, size_t uid_count);
+
 /* MIME: concatenate every non-attachment text/<subtype> part of a full
  * RFC 822 message, transfer-decoded and converted to UTF-8 where possible.
  * *parts_found counts the matching parts (so "no part" and "empty part" can

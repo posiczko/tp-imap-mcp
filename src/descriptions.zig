@@ -10,7 +10,8 @@ pub const list_accounts =
     \\Return:
     \\    [ {"name": "tetra", "login": "me@example.org", "readonly": false,
     \\       "filters": ["password_reset"]}, ... ]
-    \\    readonly accounts refuse change_keywords and create_message.
+    \\    readonly accounts refuse change_keywords, create_message and the
+    \\    folder and move/copy tools (dry runs are allowed).
     \\    filters are the account's active sensitive-content filters. Messages
     \\    they match are withheld: get_text/get_html return
     \\    [withheld by filter "<name>"] and get_header shows only date and from.
@@ -278,6 +279,102 @@ pub const create_message =
     \\    Check the date in the header before calling create_message.
     \\    If the message is a reply to another one, its "In-Reply-To" header
     \\    must contain the "Message-ID" of the original message.
+;
+
+pub const create_mailbox =
+    \\Create a folder (mailbox) and subscribe to it. Missing parent folders
+    \\are created by the server. Refused for read-only accounts.
+    \\
+    \\Args:
+    \\    name: folder path using the account's hierarchy delimiter (see
+    \\          list_mailboxes DELIMITER), e.g. "Receipts/2026"
+    \\
+    \\Return:
+    \\    {"created": "Receipts/2026", "subscribed": true}
+    \\
+    \\Notes:
+    \\    Folders cannot be created inside Gmail's [Gmail]/ system folders.
+    \\    On Gmail a folder is a label.
+;
+
+pub const rename_mailbox =
+    \\Rename a folder, or move it under another parent by giving a new path.
+    \\Subfolders move with it and subscriptions follow. Refused for read-only
+    \\accounts.
+    \\
+    \\Args:
+    \\    name: the folder to rename, e.g. "Projects/X"
+    \\    new_name: its new path, e.g. "Archive/2025/X"
+    \\
+    \\Return:
+    \\    {"renamed": "Projects/X", "to": "Archive/2025/X", "note": null}
+    \\
+    \\Notes:
+    \\    INBOX, special-use folders (Sent, Drafts, Trash, Junk/Spam,
+    \\    Archive, All Mail, ...), the drafts folder create_message uses, and
+    \\    folders containing them, cannot be renamed. On Gmail this renames
+    \\    the label.
+;
+
+pub const delete_mailbox =
+    \\Delete an empty folder. Refused if it still holds messages or
+    \\subfolders (move or delete those first), and for read-only accounts.
+    \\
+    \\Args:
+    \\    name: the folder to delete
+    \\
+    \\Return:
+    \\    {"deleted": "Old/Empty", "note": null}
+    \\
+    \\Notes:
+    \\    INBOX, special-use folders and the drafts folder create_message
+    \\    uses cannot be deleted.
+;
+
+pub const move_messages =
+    \\Move messages from one folder to another. Select them with uids (from
+    \\search) or with criteria (IMAP SEARCH syntax, as in search()).
+    \\
+    \\Args:
+    \\    directory: the source folder, e.g. "INBOX"
+    \\    destination: the target folder, e.g. "Receipts/2026"
+    \\    uids: an array of UID strings, or
+    \\    criteria: e.g. "FROM \"billing@example.com\" SINCE 1-Jan-2026"
+    \\    create_missing: true to create the destination if it does not exist
+    \\    dry_run: with criteria the default is true: nothing is moved and the
+    \\        result shows how many messages match (and the first 100 UIDs).
+    \\        Show this to the user, then call again with dry_run=false.
+    \\        With uids the default is false.
+    \\
+    \\Return:
+    \\    {"moved": 3, "source": "INBOX", "destination": "Receipts/2026",
+    \\     "uid_map": [{"from": "101", "to": "7"}, ...], "note": null}
+    \\    uid_map gives the messages' new UIDs in the destination (null if the
+    \\    server does not report them). A dry run returns
+    \\    {"dry_run": true, "matched": 42, "uids": [...], ...}.
+    \\
+    \\Notes:
+    \\    At most 5000 messages per call. Refused for read-only accounts
+    \\    (dry runs are allowed). Moving to Trash or Spam/Junk works like a
+    \\    deletion: servers may purge those folders (Gmail after 30 days).
+    \\    Gmail: moving out of INBOX archives the message and applies the
+    \\    destination label; every message also stays in [Gmail]/All Mail.
+    \\    Moving out of All Mail (\All) is refused; use copy_messages to add
+    \\    a label.
+;
+
+pub const copy_messages =
+    \\Copy messages to another folder, keeping the originals. Arguments and
+    \\selection rules are those of move_messages (uids or criteria; criteria
+    \\default to a dry run; at most 5000 messages per call).
+    \\
+    \\Return:
+    \\    {"copied": 3, "source": "INBOX", "destination": "Receipts/2026",
+    \\     "uid_map": [{"from": "101", "to": "7"}, ...], "note": null}
+    \\
+    \\Notes:
+    \\    On Gmail, copying adds the destination label; the message stays
+    \\    where it was. Refused for read-only accounts (dry runs are allowed).
 ;
 
 pub const clear_cache =

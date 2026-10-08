@@ -63,6 +63,27 @@ pub extern fn tpi_uid_store_flags(s: *Session, uids: [*]const u32, uid_count: us
 
 pub extern fn tpi_append(s: *Session, mailbox: [*:0]const u8, data: [*]const u8, len: usize) c_int;
 
+pub extern fn tpi_create(s: *Session, mailbox: [*:0]const u8) c_int;
+pub extern fn tpi_rename(s: *Session, from: [*:0]const u8, to: [*:0]const u8) c_int;
+pub extern fn tpi_delete(s: *Session, mailbox: [*:0]const u8) c_int;
+pub extern fn tpi_subscribe(s: *Session, mailbox: [*:0]const u8) c_int;
+pub extern fn tpi_unsubscribe(s: *Session, mailbox: [*:0]const u8) c_int;
+
+pub const CAP_MOVE: c_int = 1;
+pub const CAP_UIDPLUS: c_int = 2;
+pub extern fn tpi_capabilities(s: *Session, caps: *c_int) c_int;
+
+pub const CopyUid = extern struct {
+    uidvalidity: u32,
+    src: ?[*]u32,
+    src_len: usize,
+    dst: ?[*]u32,
+    dst_len: usize,
+};
+pub extern fn tpi_uid_transfer(s: *Session, uids: [*]const u32, uid_count: usize, mailbox: [*:0]const u8, move: c_int, out: *CopyUid) c_int;
+pub extern fn tpi_copyuid_free(c: *CopyUid) void;
+pub extern fn tpi_uid_expunge(s: *Session, uids: [*]const u32, uid_count: usize) c_int;
+
 pub extern fn tpi_extract_text(msg: [*]const u8, len: usize, subtype: [*:0]const u8, out: *?[*]u8, out_len: *usize, parts_found: *usize, encrypted_protocol: *?[*:0]u8) c_int;
 pub extern fn tpi_buf_free(buf: ?[*]u8) void;
 

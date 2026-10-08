@@ -1,11 +1,13 @@
 //! Live integration checks against a real IMAP account (spec §9).
 //!
-//!   op run --env-file imap.env -- zig build itest -- <account> [--write <scratch-mailbox>]
+//!   op run --env-file imap.env -- zig build itest -- <account> [--write <scratch-mailbox>] [--organize]
 //!
 //! Read-only by default. Prints only counts and shapes, never message content.
 //! Uses a throwaway cache in .zig-cache/itest-cache, never ~/.cache.
 //! `--write` adds then removes the keyword $TpImapMcpTest on the newest
 //! message of <scratch-mailbox>; use a folder you do not care about.
+//! `--organize` exercises the folder and move/copy tools (ADR 0021) on
+//! folders it creates (tp-imap-mcp-itest-<random>) and removes them again.
 
 const std = @import("std");
 const config = @import("config.zig");
@@ -14,6 +16,8 @@ const c = @import("imap/c.zig");
 const Registry = @import("accounts.zig").Registry;
 const filter = @import("filter/rules.zig");
 const unicode = @import("sanitize/unicode.zig");
+const organize = @import("organize.zig");
+const Session = @import("imap/session.zig").Session;
 
 var failures: usize = 0;
 
@@ -47,11 +51,24 @@ pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
     if (args.len < 2) {
-        std.debug.print("usage: itest <account> [--write <scratch-mailbox>]\n", .{});
+        std.debug.print("usage: itest <account> [--write <scratch-mailbox>] [--organize]\n", .{});
         return 2;
     }
     const account = args[1];
-    const write_box: ?[]const u8 = if (args.len >= 4 and std.mem.eql(u8, args[2], "--write")) args[3] else null;
+    var write_box: ?[]const u8 = null;
+    var organize_checks = false;
+    var ai: usize = 2;
+    while (ai < args.len) : (ai += 1) {
+        if (std.mem.eql(u8, args[ai], "--write") and ai + 1 < args.len) {
+            ai += 1;
+            write_box = args[ai];
+        } else if (std.mem.eql(u8, args[ai], "--organize")) {
+            organize_checks = true;
+        } else {
+            std.debug.print("unknown argument {s}\n", .{args[ai]});
+            return 2;
+        }
+    }
 
     var diag_buf: [256]u8 = undefined;
     var diag: std.Io.Writer = .fixed(&diag_buf);
@@ -153,6 +170,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     if (write_box) |box| try writeChecks(h, acct, box);
+    if (organize_checks) try organizeChecks(h, &reg, idx, acct, init.io);
 
     const wiped = try h.call("clear_cache", "{{\"account\":{s}}}", .{acct});
     const empty = if (reg.cache(idx)) |store| !(store.mailboxesFresh(3600) catch true) else false;
@@ -310,4 +328,118 @@ fn attachmentChecks(h: Harness, acct: []const u8, uids: []const std.json.Value, 
         }
     };
     report(ok, "list_attachments on {d} {s} messages: {d} attachments, well-formed and sanitized; null for missing uid", .{ n, label, total });
+}
+
+const AppendTo = struct {
+    mailbox: [:0]const u8,
+    data: []const u8,
+
+    pub const retry_after_connection_loss = false;
+    pub const connection_lost_message = "connection lost while appending the itest message";
+
+    pub fn run(self: *AppendTo, s: *Session) !void {
+        try s.append(self.mailbox, self.data);
+    }
+};
+
+/// Best-effort removal of the itest folders and their messages, through the
+/// session layer (flag \Deleted + UID EXPUNGE, then DELETE). `boxes` lists
+/// children before parents.
+const Cleanup = struct {
+    arena: std.mem.Allocator,
+    boxes: []const [:0]const u8,
+
+    pub fn run(self: *Cleanup, s: *Session) !void {
+        for (self.boxes) |b| {
+            _ = s.select(b) catch continue;
+            const uids = s.uidSearch(self.arena, "ALL") catch continue;
+            if (uids.len == 0) continue;
+            s.uidStoreFlags(self.arena, uids, true, &.{"\\Deleted"}) catch continue;
+            s.uidExpunge(uids) catch {};
+        }
+        _ = s.examine("INBOX") catch {}; // leave the folder before deleting it
+        for (self.boxes) |b| {
+            s.delete(b) catch {};
+            s.unsubscribe(b) catch {};
+        }
+    }
+};
+
+fn intField(v: ?std.json.Value, key: []const u8) ?i64 {
+    const o = v orelse return null;
+    if (o != .object) return null;
+    const f = o.object.get(key) orelse return null;
+    return if (f == .integer) f.integer else null;
+}
+
+fn messagesIn(h: Harness, acct: []const u8, box: []const u8) !?i64 {
+    const r = try h.call("mailboxes_status", "{{\"account\":{s},\"directory\":\"{s}\"}}", .{ acct, box });
+    return intField(r, "MESSAGES");
+}
+
+/// ADR 0021 tools on folders this check creates; always cleans up.
+fn organizeChecks(h: Harness, reg: *Registry, idx: usize, acct: []const u8, io: std.Io) !void {
+    var rnd: [4]u8 = undefined;
+    io.random(&rnd);
+    const a = try h.arena.print("tp-imap-mcp-itest-{x}", .{rnd});
+    const b = try h.arena.print("{s}-b", .{a});
+    const tag = try h.arena.print("tp-imap-mcp organize itest {x}", .{rnd});
+    const delim = organize.delimiterOf(try reg.mailboxList(idx, h.arena, false), "") orelse '/';
+    const ab = try h.arena.print("{s}{c}{s}", .{ a, delim, b });
+    // Folders this run created, newest (deepest) first; only these are
+    // cleaned up, so a pre-existing folder of the same name is never touched.
+    var made: std.ArrayList([:0]const u8) = .empty;
+    defer {
+        var cleanup: Cleanup = .{ .arena = h.arena, .boxes = made.items };
+        reg.run(idx, &cleanup) catch {};
+        reg.mailboxesChanged(idx, h.arena);
+        const left = h.call("list_mailboxes", "{{\"account\":{s},\"directory\":\"\",\"pattern\":\"tp-imap-mcp-itest-*\",\"refresh\":true}}", .{acct}) catch null;
+        var gone = left != null;
+        if (left) |l| for (l.array.items) |m| {
+            if (std.mem.startsWith(u8, m.object.get("PATH").?.string, a)) gone = false;
+        };
+        report(gone, "organize: test folders removed", .{});
+    }
+
+    const ca = try h.call("create_mailbox", "{{\"account\":{s},\"name\":\"{s}\"}}", .{ acct, a });
+    if (ca != null) try made.insert(h.arena, 0, try h.arena.dupeSentinel(u8, a, 0));
+    const cb = try h.call("create_mailbox", "{{\"account\":{s},\"name\":\"{s}\"}}", .{ acct, b });
+    if (cb != null) try made.insert(h.arena, 0, try h.arena.dupeSentinel(u8, b, 0));
+    report(ca != null and cb != null, "organize: create_mailbox x2", .{});
+    const listed = try h.call("list_mailboxes", "{{\"account\":{s},\"directory\":\"\",\"pattern\":\"{s}*\"}}", .{ acct, a });
+    report(listed != null and listed.?.array.items.len == 2, "organize: both folders listed (cache refreshed)", .{});
+    const dup = try h.call("create_mailbox", "{{\"account\":{s},\"name\":\"{s}\"}}", .{ acct, a });
+    report(dup == null, "organize: creating an existing folder is refused", .{});
+
+    const msg = try h.arena.print("From: itest@example.invalid\r\nTo: itest@example.invalid\r\nSubject: {s}\r\nDate: Thu, 08 Oct 2026 12:00:00 +0000\r\nMessage-ID: <{x}@tp-imap-mcp.invalid>\r\n\r\nTest message; safe to delete.\r\n", .{ tag, rnd });
+    var append: AppendTo = .{ .mailbox = try h.arena.dupeSentinel(u8, a, 0), .data = msg };
+    reg.run(idx, &append) catch {};
+    const in_a = try h.call("search", "{{\"account\":{s},\"directory\":\"{s}\",\"criteria\":\"ALL\"}}", .{ acct, a });
+    const uid = if (in_a) |v| (if (v.array.items.len == 1) v.array.items[0].string else null) else null;
+    report(uid != null, "organize: test message appended", .{});
+    if (uid == null) return;
+
+    const copied = try h.call("copy_messages", "{{\"account\":{s},\"directory\":\"{s}\",\"destination\":\"{s}\",\"uids\":[\"{s}\"]}}", .{ acct, a, b, uid.? });
+    const has_map = copied != null and copied.?.object.get("uid_map").? == .array;
+    report(intField(copied, "copied") == 1 and has_map, "organize: copy_messages by uid, uid_map present", .{});
+    report((try messagesIn(h, acct, b)) == 1 and (try messagesIn(h, acct, a)) == 1, "organize: copy keeps the original", .{});
+
+    const crit = try h.arena.print("SUBJECT \\\"{s}\\\"", .{tag});
+    const dry = try h.call("move_messages", "{{\"account\":{s},\"directory\":\"{s}\",\"destination\":\"{s}\",\"criteria\":\"{s}\"}}", .{ acct, b, a, crit });
+    report(intField(dry, "matched") == 1 and (try messagesIn(h, acct, b)) == 1, "organize: move by criteria is a dry run by default", .{});
+    const moved = try h.call("move_messages", "{{\"account\":{s},\"directory\":\"{s}\",\"destination\":\"{s}\",\"criteria\":\"{s}\",\"dry_run\":false}}", .{ acct, b, a, crit });
+    report(intField(moved, "moved") == 1, "organize: move_messages dry_run=false moves", .{});
+    report((try messagesIn(h, acct, b)) == 0 and (try messagesIn(h, acct, a)) == 2, "organize: source emptied, destination has both", .{});
+
+    const renamed = try h.call("rename_mailbox", "{{\"account\":{s},\"name\":\"{s}\",\"new_name\":\"{s}\"}}", .{ acct, b, ab });
+    report(renamed != null, "organize: rename_mailbox moves a folder under another", .{});
+    if (renamed != null) for (made.items) |*m| {
+        if (std.mem.eql(u8, m.*, b)) m.* = try h.arena.dupeSentinel(u8, ab, 0);
+    };
+    const nonempty = try h.call("delete_mailbox", "{{\"account\":{s},\"name\":\"{s}\"}}", .{ acct, a });
+    report(nonempty == null, "organize: delete_mailbox refuses a non-empty folder", .{});
+    const inbox = try h.call("rename_mailbox", "{{\"account\":{s},\"name\":\"INBOX\",\"new_name\":\"{s}-inbox\"}}", .{ acct, a });
+    report(inbox == null, "organize: INBOX cannot be renamed", .{});
+    const deleted = try h.call("delete_mailbox", "{{\"account\":{s},\"name\":\"{s}\"}}", .{ acct, ab });
+    report(deleted != null, "organize: delete_mailbox removes an empty folder", .{});
 }

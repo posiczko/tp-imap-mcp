@@ -74,6 +74,19 @@ pub const Fetched = struct {
     flags: ?[]const []const u8,
 };
 
+/// Server extensions the organization tools depend on (ADR 0021).
+pub const Caps = struct {
+    move: bool = false,
+    uidplus: bool = false,
+};
+
+/// COPYUID response code: UID ranges as (first, last); a last of 0 is "*".
+pub const CopyUid = struct {
+    uidvalidity: u32,
+    src: []const [2]u32,
+    dst: []const [2]u32,
+};
+
 pub const Session = struct {
     handle: *c.Session,
 
@@ -213,6 +226,52 @@ pub const Session = struct {
     pub fn append(self: *Session, mailbox: [:0]const u8, data: []const u8) Error!void {
         try check(c.tpi_append(self.handle, mailbox, data.ptr, data.len));
     }
+
+    pub fn create(self: *Session, mailbox: [:0]const u8) Error!void {
+        try check(c.tpi_create(self.handle, mailbox));
+    }
+
+    pub fn rename(self: *Session, from: [:0]const u8, to: [:0]const u8) Error!void {
+        try check(c.tpi_rename(self.handle, from, to));
+    }
+
+    pub fn delete(self: *Session, mailbox: [:0]const u8) Error!void {
+        try check(c.tpi_delete(self.handle, mailbox));
+    }
+
+    pub fn subscribe(self: *Session, mailbox: [:0]const u8) Error!void {
+        try check(c.tpi_subscribe(self.handle, mailbox));
+    }
+
+    pub fn unsubscribe(self: *Session, mailbox: [:0]const u8) Error!void {
+        try check(c.tpi_unsubscribe(self.handle, mailbox));
+    }
+
+    /// MOVE / UIDPLUS support (one CAPABILITY command per connection).
+    pub fn capabilities(self: *Session) Error!Caps {
+        var mask: c_int = 0;
+        try check(c.tpi_capabilities(self.handle, &mask));
+        return .{ .move = mask & c.CAP_MOVE != 0, .uidplus = mask & c.CAP_UIDPLUS != 0 };
+    }
+
+    /// UID MOVE (`move`) or UID COPY from the selected mailbox. Returns the
+    /// server's COPYUID data, or null if it sent none.
+    pub fn uidTransfer(self: *Session, arena: Allocator, uids: []const u32, mailbox: [:0]const u8, move: bool) Error!?CopyUid {
+        var out: c.CopyUid = undefined;
+        try check(c.tpi_uid_transfer(self.handle, uids.ptr, uids.len, mailbox, @intFromBool(move), &out));
+        defer c.tpi_copyuid_free(&out);
+        if (out.uidvalidity == 0) return null;
+        return .{
+            .uidvalidity = out.uidvalidity,
+            .src = try pairs(arena, out.src, out.src_len),
+            .dst = try pairs(arena, out.dst, out.dst_len),
+        };
+    }
+
+    /// UID EXPUNGE (UIDPLUS) of exactly these UIDs.
+    pub fn uidExpunge(self: *Session, uids: []const u32) Error!void {
+        try check(c.tpi_uid_expunge(self.handle, uids.ptr, uids.len));
+    }
 };
 
 /// Checks that the DER certificate `der` is valid for `host` (SAN DNS/IP
@@ -224,6 +283,13 @@ pub fn checkHostName(der: []const u8, host: []const u8) error{HostnameMismatch}!
     const cert: std.crypto.Certificate = .{ .buffer = der, .index = 0 };
     const parsed = cert.parse() catch return error.HostnameMismatch;
     parsed.verifyHostName(host) catch return error.HostnameMismatch;
+}
+
+fn pairs(arena: Allocator, ptr: ?[*]const u32, len: usize) Allocator.Error![]const [2]u32 {
+    const p = ptr orelse return &.{};
+    const out = try arena.alloc([2]u32, len / 2);
+    for (out, 0..) |*o, i| o.* = .{ p[2 * i], p[2 * i + 1] };
+    return out;
 }
 
 fn splitFlags(arena: Allocator, s: []const u8) Allocator.Error![]const []const u8 {

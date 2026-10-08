@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const unicode = @import("sanitize/unicode.zig");
 
 pub const Error = error{
     CriteriaHasControlChars,
@@ -14,6 +15,12 @@ pub const Error = error{
     InvalidKeyword,
     InvalidField,
     MailboxHasNul,
+    MailboxNameEmpty,
+    MailboxNameTooLong,
+    MailboxNameInvalid,
+    MailboxNameWildcard,
+    MailboxNameDelimiter,
+    MailboxNameInvisible,
 } || Allocator.Error;
 
 pub fn message(err: Error) []const u8 {
@@ -26,6 +33,12 @@ pub fn message(err: Error) []const u8 {
         error.InvalidKeyword => "each keyword must be a system flag (\\Seen, \\Answered, \\Flagged, \\Deleted, \\Draft) or an IMAP atom",
         error.InvalidField => "field must be a header name (printable ASCII, no ':' or space)",
         error.MailboxHasNul => "mailbox name must not contain NUL",
+        error.MailboxNameEmpty => "mailbox name must not be empty",
+        error.MailboxNameTooLong => "mailbox name must be at most 512 bytes",
+        error.MailboxNameInvalid => "mailbox name must be valid UTF-8 without control characters",
+        error.MailboxNameWildcard => "mailbox name must not contain * or %",
+        error.MailboxNameDelimiter => "mailbox name must not start or end with the hierarchy delimiter or contain it twice in a row",
+        error.MailboxNameInvisible => "mailbox name must not contain invisible or control characters",
         error.OutOfMemory => "out of memory",
     };
 }
@@ -92,6 +105,23 @@ pub fn mailbox(s: []const u8) Error!void {
     if (std.mem.findScalar(u8, s, 0) != null) return error.MailboxHasNul;
 }
 
+pub const mailbox_name_max = 512;
+
+/// A folder name to create or rename to (ADR 0021), in UTF-8 before
+/// modified UTF-7 encoding. `delimiter` is the account's hierarchy delimiter
+/// (null when the server has none).
+pub fn mailboxName(s: []const u8, delimiter: ?u8) Error!void {
+    if (s.len == 0) return error.MailboxNameEmpty;
+    if (s.len > mailbox_name_max) return error.MailboxNameTooLong;
+    if (!std.unicode.utf8ValidateSlice(s)) return error.MailboxNameInvalid;
+    for (s) |c| if (c < 0x20 or c == 0x7f) return error.MailboxNameInvalid;
+    if (!unicode.isClean(s)) return error.MailboxNameInvisible; // look-alikes ("INBOX\u{200B}")
+    if (std.mem.findAny(u8, s, "*%") != null) return error.MailboxNameWildcard;
+    const d = delimiter orelse return;
+    if (s[0] == d or s[s.len - 1] == d) return error.MailboxNameDelimiter;
+    if (std.mem.find(u8, s, &.{ d, d }) != null) return error.MailboxNameDelimiter;
+}
+
 const testing = std.testing;
 
 test "criteria rejects CR, LF, NUL" {
@@ -137,6 +167,35 @@ test "field accepts header names only" {
 test "mailbox rejects NUL" {
     try mailbox("INBOX/Archives");
     try testing.expectError(error.MailboxHasNul, mailbox("IN\x00BOX"));
+}
+
+test "mailboxName accepts folder paths and rejects unsafe names" {
+    try mailboxName("Receipts/2026", '/');
+    try mailboxName("Projets/R\u{e9}sum\u{e9}s", '/');
+    try mailboxName("Archive.2025", '.');
+    try mailboxName("/odd", null); // no delimiter: no delimiter rules
+    try testing.expectError(error.MailboxNameEmpty, mailboxName("", '/'));
+    const long: [513]u8 = @splat('a');
+    try testing.expectError(error.MailboxNameTooLong, mailboxName(&long, '/'));
+    try mailboxName(long[0..512], '/');
+    try testing.expectError(error.MailboxNameInvalid, mailboxName("bad\xff", '/'));
+    try testing.expectError(error.MailboxNameInvalid, mailboxName("two\r\nlines", '/'));
+    try testing.expectError(error.MailboxNameInvalid, mailboxName("tab\there", '/'));
+    try testing.expectError(error.MailboxNameInvalid, mailboxName("nul\x00", '/'));
+    try testing.expectError(error.MailboxNameWildcard, mailboxName("All*", '/'));
+    try testing.expectError(error.MailboxNameWildcard, mailboxName("50%", '/'));
+    try testing.expectError(error.MailboxNameDelimiter, mailboxName("/Receipts", '/'));
+    try testing.expectError(error.MailboxNameDelimiter, mailboxName("Receipts/", '/'));
+    try testing.expectError(error.MailboxNameDelimiter, mailboxName("A//B", '/'));
+    try testing.expectError(error.MailboxNameDelimiter, mailboxName("A..B", '.'));
+}
+
+test "review: mailboxName rejects invisible, bidi and C1 characters" {
+    try testing.expectError(error.MailboxNameInvisible, mailboxName("INBOX\u{200B}", '/'));
+    try testing.expectError(error.MailboxNameInvisible, mailboxName("Bills\u{202E}fdp", '/'));
+    try testing.expectError(error.MailboxNameInvisible, mailboxName("C1\u{85}", '/'));
+    try testing.expectError(error.MailboxNameInvisible, mailboxName("soft\u{AD}hyphen", '/'));
+    try mailboxName("R\u{e9}sum\u{e9}s", '/');
 }
 
 test "todo: criteria cannot end in an IMAP literal marker" {

@@ -14,6 +14,7 @@ const attachments = @import("attachments.zig");
 const unicode = @import("sanitize/unicode.zig");
 const limit = @import("sanitize/limit.zig");
 const mutf7 = @import("imap/mutf7.zig");
+const organize = @import("organize.zig");
 const imap = @import("imap/session.zig");
 const text = @import("text.zig");
 const validate = @import("validate.zig");
@@ -138,6 +139,41 @@ const Ctx = struct {
         return ctx.arena.dupeSentinel(u8, wire, 0);
     }
 
+    /// A folder name to create or rename to (ADR 0021): validated against
+    /// the account's hierarchy delimiter; UTF-8 and wire forms.
+    fn folderName(ctx: *Ctx, key: []const u8, delimiter: ?u8) Failure!struct { utf8: []const u8, wire: [:0]const u8 } {
+        const utf8 = try ctx.string(key);
+        try ctx.check(validate.mailboxName(utf8, delimiter));
+        const wire = mutf7.encode(ctx.arena, utf8) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidUtf8 => return ctx.invalid("argument \"{s}\" is not valid UTF-8", .{key}),
+        };
+        return .{ .utf8 = utf8, .wire = try ctx.arena.dupeSentinel(u8, wire, 0) };
+    }
+
+    /// Refuses a `key` argument that resolveMailbox would have to guess:
+    /// several folders match it once invisible characters are removed.
+    fn unambiguous(ctx: *Ctx, boxes: []const imap.Mailbox, key: []const u8) Failure!void {
+        const utf8 = try ctx.string(key);
+        const encoded = mutf7.encode(ctx.arena, utf8) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidUtf8 => return ctx.invalid("argument \"{s}\" is not valid UTF-8", .{key}),
+        };
+        if (try ambiguousMailbox(ctx.arena, boxes, utf8, encoded))
+            return ctx.failed("mailbox name \"{s}\" is ambiguous; several folders have this name once invisible characters are removed. Rename them in a mail client first.", .{utf8});
+    }
+
+    /// Wire name of the folder create_message appends to (protected).
+    fn drafts(ctx: *Ctx, idx: usize) Failure![]const u8 {
+        return ctx.registry.drafts(idx, ctx.arena) catch |err| return ctx.imapFailed(err);
+    }
+
+    /// The account's mailbox list straight from the server (also refreshes
+    /// the cache, so `mailbox()` resolves against it).
+    fn freshList(ctx: *Ctx, idx: usize) Failure![]imap.Mailbox {
+        return ctx.registry.mailboxList(idx, ctx.arena, true) catch |err| return ctx.imapFailed(err);
+    }
+
     /// Runs an IMAP operation; maps failures to a tool error.
     fn imapRun(ctx: *Ctx, idx: usize, op: anytype) Failure!void {
         ctx.registry.run(idx, op) catch |err| return ctx.imapFailed(err);
@@ -174,6 +210,16 @@ const Tool = struct {
 const p_account: Param = .{ .name = "account", .kind = .string, .description = desc.account_param };
 const p_directory: Param = .{ .name = "directory", .kind = .string, .description = "Mailbox path, e.g. \"INBOX\" or \"Archives/2024\"" };
 const p_uids: Param = .{ .name = "uids", .kind = .string_array, .description = "Message UIDs from search()" };
+const p_folder: Param = .{ .name = "name", .kind = .string, .description = "Folder path, e.g. \"Receipts/2026\"" };
+const transfer_params = [_]Param{
+    p_account,
+    .{ .name = "directory", .kind = .string, .description = "Source mailbox, e.g. \"INBOX\"" },
+    .{ .name = "destination", .kind = .string, .description = "Destination mailbox, e.g. \"Receipts/2026\"" },
+    .{ .name = "uids", .kind = .string_array, .description = "Message UIDs from search(); pass this or criteria", .required = false },
+    .{ .name = "criteria", .kind = .string, .description = "IMAP SEARCH criteria selecting the messages; pass this or uids", .required = false },
+    .{ .name = "create_missing", .kind = .boolean, .description = "true to create the destination if it does not exist (default false)", .required = false },
+    .{ .name = "dry_run", .kind = .boolean, .description = "true to only report what would happen; default true with criteria, false with uids", .required = false },
+};
 
 pub const tools = [_]Tool{
     .{ .name = "list_accounts", .description = desc.list_accounts, .params = &.{}, .handler = listAccounts },
@@ -209,6 +255,15 @@ pub const tools = [_]Tool{
         p_account,
         .{ .name = "content", .kind = .string, .description = "Raw RFC 822 message" },
     }, .handler = createMessage },
+    .{ .name = "create_mailbox", .description = desc.create_mailbox, .params = &.{ p_account, p_folder }, .handler = createMailbox },
+    .{ .name = "rename_mailbox", .description = desc.rename_mailbox, .params = &.{
+        p_account,
+        .{ .name = "name", .kind = .string, .description = "Folder to rename, e.g. \"Projects/X\"" },
+        .{ .name = "new_name", .kind = .string, .description = "New path; a different parent moves the folder, e.g. \"Archive/2025/X\"" },
+    }, .handler = renameMailbox },
+    .{ .name = "delete_mailbox", .description = desc.delete_mailbox, .params = &.{ p_account, p_folder }, .handler = deleteMailbox },
+    .{ .name = "move_messages", .description = desc.move_messages, .params = &transfer_params, .handler = moveMessages },
+    .{ .name = "copy_messages", .description = desc.copy_messages, .params = &transfer_params, .handler = copyMessages },
     .{ .name = "clear_cache", .description = desc.clear_cache, .params = &.{p_account}, .handler = clearCache },
 };
 
@@ -684,6 +739,185 @@ fn createMessage(ctx: *Ctx) Failure![]const u8 {
     return ctx.json(.{ .status = "OK", .data = .{try text.sanitizeUtf8(ctx.arena, op.response)} });
 }
 
+/// A wire mailbox name as shown to the model (decoded, cleaned).
+fn displayName(arena: Allocator, wire: []const u8) Allocator.Error![]const u8 {
+    const decoded = mutf7.decode(arena, wire) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidMutf7 => try text.sanitizeUtf8(arena, wire),
+    };
+    return unicode.clean(arena, decoded);
+}
+
+fn createMailbox(ctx: *Ctx) Failure![]const u8 {
+    const idx = try ctx.account();
+    try ctx.writable(idx);
+    try ctx.check(validate.mailboxName(try ctx.string("name"), null)); // delimiter rules need the list
+    const boxes = try ctx.freshList(idx);
+    const d = organize.delimiterOf(boxes, "");
+    const name = try ctx.folderName("name", d);
+    if (try organize.targetReason(ctx.arena, name.utf8, name.wire, null, d)) |r| return ctx.failed("{s}", .{r});
+    if (organize.find(boxes, name.wire) != null) return ctx.failed("mailbox \"{s}\" already exists", .{name.utf8});
+    var op: CreateOp = .{ .mailbox = name.wire };
+    try ctx.imapRun(idx, &op);
+    ctx.registry.mailboxesChanged(idx, ctx.arena);
+    return ctx.json(.{ .created = name.utf8, .subscribed = op.subscribed });
+}
+
+fn renameMailbox(ctx: *Ctx) Failure![]const u8 {
+    const idx = try ctx.account();
+    try ctx.writable(idx);
+    try ctx.check(validate.mailboxName(try ctx.string("new_name"), null));
+    const boxes = try ctx.freshList(idx);
+    const from = try ctx.mailbox("name", null);
+    try ctx.unambiguous(boxes, "name");
+    if (organize.find(boxes, from) == null) return ctx.failed("mailbox \"{s}\" does not exist", .{try displayName(ctx.arena, from)});
+    if (try organize.protectedReason(ctx.arena, boxes, from, try ctx.drafts(idx))) |r| return ctx.failed("{s}", .{r});
+    const d = organize.delimiterOf(boxes, from);
+    const to = try ctx.folderName("new_name", d);
+    if (try organize.targetReason(ctx.arena, to.utf8, to.wire, from, d)) |r| return ctx.failed("{s}", .{r});
+    if (organize.find(boxes, to.wire) != null) return ctx.failed("mailbox \"{s}\" already exists", .{to.utf8});
+
+    var children: std.ArrayList([2][:0]const u8) = .empty;
+    for (boxes) |b| {
+        if (!organize.isBelow(b.name, from, d)) continue;
+        try children.append(ctx.arena, .{
+            try ctx.arena.dupeSentinel(u8, b.name, 0),
+            try ctx.arena.printSentinel("{s}{s}", .{ to.wire, b.name[from.len..] }, 0),
+        });
+    }
+    var op: RenameOp = .{ .from = from, .to = to.wire, .children = children.items };
+    try ctx.imapRun(idx, &op);
+    ctx.registry.mailboxesChanged(idx, ctx.arena);
+    const note: ?[]const u8 = if (op.subscribe_failures > 0)
+        try ctx.arena.print("could not subscribe {d} renamed folder(s); mail clients that show only subscribed folders may hide them", .{op.subscribe_failures})
+    else
+        null;
+    return ctx.json(.{ .renamed = try displayName(ctx.arena, from), .to = to.utf8, .note = note });
+}
+
+fn deleteMailbox(ctx: *Ctx) Failure![]const u8 {
+    const idx = try ctx.account();
+    try ctx.writable(idx);
+    const boxes = try ctx.freshList(idx);
+    const name = try ctx.mailbox("name", null);
+    try ctx.unambiguous(boxes, "name");
+    const shown = try displayName(ctx.arena, name);
+    const box = organize.find(boxes, name) orelse return ctx.failed("mailbox \"{s}\" does not exist", .{shown});
+    if (try organize.protectedReason(ctx.arena, boxes, name, try ctx.drafts(idx))) |r| return ctx.failed("{s}", .{r});
+    const d = organize.delimiterOf(boxes, name);
+    var subfolders: usize = 0;
+    for (boxes) |b| {
+        if (organize.isBelow(b.name, name, d)) subfolders += 1;
+    }
+    var op: DeleteOp = .{ .mailbox = name, .selectable = organize.selectable(box), .subfolders = subfolders };
+    try ctx.imapRun(idx, &op);
+    if (op.refused) return ctx.failed("\"{s}\" is not empty ({d} messages, {d} subfolders); move or delete its contents first", .{ shown, op.messages, subfolders });
+    ctx.registry.mailboxesChanged(idx, ctx.arena);
+    const note: ?[]const u8 = if (op.unsubscribed) null else "the folder was deleted but could not be unsubscribed";
+    return ctx.json(.{ .deleted = shown, .note = note });
+}
+
+fn moveMessages(ctx: *Ctx) Failure![]const u8 {
+    return transfer(ctx, true);
+}
+
+fn copyMessages(ctx: *Ctx) Failure![]const u8 {
+    return transfer(ctx, false);
+}
+
+const UidPairJson = struct { from: []const u8, to: []const u8 };
+
+/// move_messages / copy_messages (spec §2, §4.2).
+fn transfer(ctx: *Ctx, move: bool) Failure![]const u8 {
+    const idx = try ctx.account();
+    const has_uids = ctx.get("uids") != null;
+    const has_criteria = ctx.get("criteria") != null;
+    if (organize.selectionProblem(has_uids, has_criteria)) |p| return ctx.invalid("{s}", .{p});
+    var given: ?[]const u32 = null;
+    var command: [:0]const u8 = "";
+    if (has_uids) {
+        const u = try ctx.uids();
+        if (u.len > organize.max_messages) return ctx.invalid("at most {d} messages per call; got {d} uids", .{ organize.max_messages, u.len });
+        given = u;
+    } else {
+        const criteria = try ctx.string("criteria");
+        try ctx.check(validate.criteria(criteria));
+        command = try ctx.arena.printSentinel("CHARSET UTF-8 {s}", .{criteria}, 0);
+    }
+    const dry_run = try ctx.booleanOr("dry_run", has_criteria);
+    const create_missing = try ctx.booleanOr("create_missing", false);
+    const dest_utf8 = try ctx.string("destination");
+    try ctx.check(validate.mailbox(dest_utf8));
+    if (!dry_run) try ctx.writable(idx);
+
+    const boxes = try ctx.freshList(idx);
+    const source = try ctx.mailbox("directory", null);
+    const destination = try ctx.mailbox("destination", null);
+    // INBOX matches in any case: "INBOX" and "inbox" are one folder.
+    if (organize.sameMailbox(boxes, source, destination)) return ctx.invalid("destination must differ from directory", .{});
+    const source_shown = try displayName(ctx.arena, source);
+    const src_box = organize.find(boxes, source) orelse return ctx.failed("mailbox \"{s}\" does not exist", .{source_shown});
+    if (!organize.selectable(src_box)) return ctx.failed("\"{s}\" cannot hold messages (\\Noselect)", .{source_shown});
+    if (move) if (try organize.moveSourceReason(ctx.arena, src_box)) |r| return ctx.failed("{s}", .{r});
+    const dest_box = organize.find(boxes, destination);
+    var note: ?[]const u8 = organize.destinationNote(dest_box);
+    if (dest_box) |b| {
+        if (!organize.selectable(b)) return ctx.failed("\"{s}\" cannot hold messages (\\Noselect)", .{dest_utf8});
+    } else {
+        if (!create_missing) return ctx.failed("mailbox \"{s}\" does not exist; create it with create_mailbox (or pass create_missing=true)", .{dest_utf8});
+        const d = organize.delimiterOf(boxes, destination);
+        try ctx.check(validate.mailboxName(dest_utf8, d));
+        if (try organize.targetReason(ctx.arena, dest_utf8, destination, null, d)) |r| return ctx.failed("{s}", .{r});
+        if (dry_run) note = "the destination does not exist yet; it will be created";
+    }
+    const dest_shown = if (dest_box != null) try displayName(ctx.arena, destination) else dest_utf8;
+
+    var op: TransferOp = .{
+        .arena = ctx.arena,
+        .source = source,
+        .destination = destination,
+        .move = move,
+        .dry_run = dry_run,
+        .create_destination = dest_box == null,
+        .uids = given,
+        .command = command,
+    };
+    ctx.registry.run(idx, &op) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        const d = ctx.registry.diag();
+        const why = if (d.len > 0) d else @errorName(err);
+        const msg = if (op.pending > 0)
+            try partialMoveMessage(ctx.arena, op.done, op.matched.len, op.pending, dest_shown, source_shown, why)
+        else if (op.done > 0)
+            try ctx.arena.print("{d} of {d} messages were {s} before the error: {s}", .{ op.done, op.matched.len, if (move) "moved" else "copied", why })
+        else
+            try ctx.arena.dupe(u8, why);
+        if (op.created) ctx.registry.mailboxesChanged(idx, ctx.arena);
+        if (move and op.done > 0) ctx.registry.forgetMoved(idx, source, op.uidvalidity, op.matched[0..op.done]);
+        return ctx.failed("{s}", .{msg});
+    };
+    if (op.refused) |r| return ctx.failed("{s}", .{r});
+    if (op.matched.len > organize.max_messages and !dry_run)
+        return ctx.failed("{d} messages match; at most {d} per call. Narrow the criteria or split the work.", .{ op.matched.len, organize.max_messages });
+    if (op.created) ctx.registry.mailboxesChanged(idx, ctx.arena);
+    if (move and op.done > 0) ctx.registry.forgetMoved(idx, source, op.uidvalidity, op.matched[0..op.done]);
+
+    if (dry_run) {
+        const preview = op.matched[0..@min(op.matched.len, organize.dry_run_preview)];
+        const strs = try ctx.arena.alloc([]const u8, preview.len);
+        for (preview, strs) |u, *o| o.* = try ctx.arena.print("{d}", .{u});
+        return ctx.json(.{ .dry_run = true, .matched = op.matched.len, .uids = strs, .source = source_shown, .destination = dest_shown, .note = note });
+    }
+    var uid_map: ?[]UidPairJson = null;
+    if (op.map_complete and op.pairs.items.len > 0) {
+        const m = try ctx.arena.alloc(UidPairJson, op.pairs.items.len);
+        for (op.pairs.items, m) |pair, *o| o.* = .{ .from = try ctx.arena.print("{d}", .{pair.from}), .to = try ctx.arena.print("{d}", .{pair.to}) };
+        uid_map = m;
+    }
+    if (move) return ctx.json(.{ .moved = op.done, .source = source_shown, .destination = dest_shown, .uid_map = uid_map, .note = note });
+    return ctx.json(.{ .copied = op.done, .source = source_shown, .destination = dest_shown, .uid_map = uid_map, .note = note });
+}
+
 fn clearCache(ctx: *Ctx) Failure![]const u8 {
     const idx = try ctx.account();
     if (!ctx.registry.clearCache(idx)) return ctx.json(.{ .status = "OK", .note = "caching is disabled for this account" });
@@ -882,6 +1116,166 @@ const AppendOp = struct {
     }
 };
 
+/// A SUBSCRIBE-style call whose refusal must not fail the tool (spec §4.4):
+/// true on success, false if the server said NO/BAD.
+fn bestEffort(result: accounts.Error!void) accounts.Error!bool {
+    result catch |err| switch (err) {
+        error.ServerRejected => return false,
+        else => return err,
+    };
+    return true;
+}
+
+const CreateOp = struct {
+    mailbox: [:0]const u8,
+    subscribed: bool = false,
+
+    // Not retried: a resent CREATE fails with "already exists" (ADR 0021).
+    pub const retry_after_connection_loss = false;
+    pub const connection_lost_message = "connection lost while creating the mailbox; it may or may not exist now. Check with list_mailboxes (refresh=true) before retrying.";
+
+    pub fn run(self: *CreateOp, s: *Session) accounts.Error!void {
+        try s.create(self.mailbox);
+        self.subscribed = try bestEffort(s.subscribe(self.mailbox));
+    }
+};
+
+const RenameOp = struct {
+    from: [:0]const u8,
+    to: [:0]const u8,
+    /// Subfolders (old, new wire names); their subscriptions follow.
+    children: []const [2][:0]const u8,
+    subscribe_failures: usize = 0,
+
+    pub const retry_after_connection_loss = false;
+    pub const connection_lost_message = "connection lost while renaming the mailbox; it may or may not have been renamed. Check with list_mailboxes (refresh=true) before retrying.";
+
+    pub fn run(self: *RenameOp, s: *Session) accounts.Error!void {
+        _ = try s.examine("INBOX"); // leave the folder if a move selected it
+        try s.rename(self.from, self.to);
+        try self.follow(s, self.from, self.to);
+        for (self.children) |c| try self.follow(s, c[0], c[1]);
+    }
+
+    fn follow(self: *RenameOp, s: *Session, old: [:0]const u8, new: [:0]const u8) accounts.Error!void {
+        _ = try bestEffort(s.unsubscribe(old)); // often not subscribed: ignore
+        if (!try bestEffort(s.subscribe(new))) self.subscribe_failures += 1;
+    }
+};
+
+const DeleteOp = struct {
+    mailbox: [:0]const u8,
+    selectable: bool,
+    subfolders: usize,
+    messages: u32 = 0,
+    refused: bool = false,
+    unsubscribed: bool = false,
+
+    pub const retry_after_connection_loss = false;
+    pub const connection_lost_message = "connection lost while deleting the mailbox; it may or may not have been deleted. Check with list_mailboxes (refresh=true) before retrying.";
+
+    pub fn run(self: *DeleteOp, s: *Session) accounts.Error!void {
+        // Leave the folder if a move selected it: no STATUS or DELETE of the
+        // selected mailbox (RFC 3501 6.3.10; some servers refuse).
+        _ = try s.examine("INBOX");
+        if (self.selectable) self.messages = (try s.status(self.mailbox)).messages;
+        if (self.messages > 0 or self.subfolders > 0) {
+            self.refused = true;
+            return;
+        }
+        try s.delete(self.mailbox);
+        self.unsubscribed = try bestEffort(s.unsubscribe(self.mailbox));
+    }
+};
+
+const unsupported_move = "the server supports neither MOVE nor UIDPLUS, so messages cannot be moved safely; use copy_messages and remove the originals in your mail client";
+
+const TransferOp = struct {
+    arena: Allocator,
+    source: [:0]const u8,
+    destination: [:0]const u8,
+    move: bool,
+    dry_run: bool,
+    create_destination: bool,
+    /// Given UIDs, or null to select by `command` (UID SEARCH arguments).
+    uids: ?[]const u32,
+    command: [:0]const u8,
+
+    matched: []const u32 = &.{},
+    uidvalidity: u32 = 0,
+    refused: ?[]const u8 = null,
+    created: bool = false,
+    /// Messages moved/copied so far (a prefix of `matched`).
+    done: usize = 0,
+    /// Size of the batch the copy+expunge fallback copied but failed to
+    /// remove (0 otherwise).
+    pending: usize = 0,
+    pairs: std.ArrayList(organize.UidPair) = .empty,
+    map_complete: bool = true,
+
+    // Not retried: a resent COPY duplicates messages (ADR 0021).
+    pub const retry_after_connection_loss = false;
+    pub const connection_lost_message = "connection lost while moving or copying messages; some may have been moved or copied. Check with search before retrying.";
+
+    pub fn run(self: *TransferOp, s: *Session) accounts.Error!void {
+        const acting = !self.dry_run;
+        const strategy: organize.MoveStrategy = if (self.move and acting) organize.moveStrategy(try s.capabilities()) else .move;
+        if (strategy == .unsupported) {
+            self.refused = unsupported_move;
+            return;
+        }
+        self.uidvalidity = if (self.move and acting) try s.select(self.source) else try s.examine(self.source);
+        self.matched = if (self.uids) |given| try existingUids(self.arena, s, given) else blk: {
+            const found = try s.uidSearch(self.arena, self.command);
+            std.mem.sort(u32, found, {}, std.sort.asc(u32));
+            break :blk found;
+        };
+        if (!acting or self.matched.len > organize.max_messages) return;
+        if (self.create_destination) {
+            try s.create(self.destination);
+            self.created = true;
+            _ = try bestEffort(s.subscribe(self.destination));
+        }
+        for (0..organize.batchCount(self.matched.len)) |i| {
+            const b = organize.batch(self.matched, i);
+            const cu = try s.uidTransfer(self.arena, b, self.destination, self.move and strategy == .move);
+            if (self.move and strategy == .copy_expunge) {
+                s.uidStoreFlags(self.arena, b, true, &.{"\\Deleted"}) catch |err| {
+                    self.pending = b.len;
+                    return err;
+                };
+                s.uidExpunge(b) catch |err| {
+                    self.pending = b.len;
+                    return err;
+                };
+            }
+            self.done += b.len;
+            if (try organize.uidMap(self.arena, cu)) |m| try self.pairs.appendSlice(self.arena, m) else self.map_complete = false;
+        }
+    }
+};
+
+/// The given UIDs that exist in the selected mailbox, in input order without
+/// duplicates (so counts and UID maps describe real messages).
+fn existingUids(arena: Allocator, s: *Session, given: []const u32) accounts.Error![]const u32 {
+    var present: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    for (0..organize.batchCount(given.len)) |i| {
+        for (try s.uidFetch(arena, organize.batch(given, i), .{ .size = true })) |f| try present.put(arena, f.uid, {});
+    }
+    return keepPresent(arena, given, &present);
+}
+
+fn keepPresent(arena: Allocator, given: []const u32, present: *const std.AutoHashMapUnmanaged(u32, void)) Allocator.Error![]const u32 {
+    var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    var out: std.ArrayList(u32) = .empty;
+    for (given) |u| {
+        if (!present.contains(u)) continue;
+        if ((try seen.getOrPut(arena, u)).found_existing) continue;
+        try out.append(arena, u);
+    }
+    return out.items;
+}
+
 /// Response-budget decision for one item; withheld entries are always kept
 /// (sanitization spec §5.2).
 fn admitItem(budget: *limit.Budget, size: usize, withheld: ?[]const u8) bool {
@@ -905,6 +1299,27 @@ fn resolveMailbox(arena: Allocator, boxes: []const imap.Mailbox, utf8: []const u
         if (std.mem.eql(u8, try unicode.clean(arena, decoded), utf8)) return b.name;
     }
     return encoded;
+}
+
+/// True when no mailbox is named `encoded` exactly but several match `utf8`
+/// after invisible-character cleaning (resolveMailbox would pick the first).
+fn ambiguousMailbox(arena: Allocator, boxes: []const imap.Mailbox, utf8: []const u8, encoded: []const u8) Allocator.Error!bool {
+    for (boxes) |b| if (std.mem.eql(u8, b.name, encoded)) return false;
+    var n: usize = 0;
+    for (boxes) |b| {
+        const decoded = mutf7.decode(arena, b.name) catch continue;
+        if (std.mem.eql(u8, try unicode.clean(arena, decoded), utf8)) n += 1;
+    }
+    return n > 1;
+}
+
+/// Error text when the copy+expunge fallback fails at batch k: batches
+/// before it were moved, batch k (`pending`) copied but not removed, later
+/// ones not touched.
+fn partialMoveMessage(arena: Allocator, done: usize, total: usize, pending: usize, destination: []const u8, source: []const u8, why: []const u8) Allocator.Error![]const u8 {
+    const rest = total -| (done + pending);
+    const untouched = if (rest > 0) try arena.print("; the remaining {d} were not touched", .{rest}) else "";
+    return arena.print("{d} of {d} messages were moved; the next {d} were copied to \"{s}\" but not removed from \"{s}\" (they may be flagged \\Deleted){s}: {s}", .{ done, total, pending, destination, source, untouched, why });
 }
 
 /// Splits cached entries into those the server still has and the UIDs gone.
@@ -1231,4 +1646,140 @@ test "todo: attachment JSON shape" {
         "[{\"filename\":\"a.pdf\",\"content_type\":\"application/pdf\",\"size\":3,\"inline\":false}]",
         try attachmentsJson(a, &atts),
     );
+}
+
+test "organization tools: read-only accounts refuse changes but allow dry runs" {
+    var accts = testAccounts();
+    var reg = try testRegistry(&accts);
+    defer reg.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const ro = "account \"ro\" is read-only";
+    try testing.expectEqualStrings(ro, (try callJson(&reg, a, "create_mailbox", "{\"account\":\"ro\",\"name\":\"X\"}")).?.tool_error);
+    try testing.expectEqualStrings(ro, (try callJson(&reg, a, "rename_mailbox", "{\"account\":\"ro\",\"name\":\"X\",\"new_name\":\"Y\"}")).?.tool_error);
+    try testing.expectEqualStrings(ro, (try callJson(&reg, a, "delete_mailbox", "{\"account\":\"ro\",\"name\":\"X\"}")).?.tool_error);
+    try testing.expectEqualStrings(ro, (try callJson(&reg, a, "move_messages", "{\"account\":\"ro\",\"directory\":\"INBOX\",\"destination\":\"X\",\"uids\":[\"1\"]}")).?.tool_error);
+    try testing.expectEqualStrings(ro, (try callJson(&reg, a, "copy_messages", "{\"account\":\"ro\",\"directory\":\"INBOX\",\"destination\":\"X\",\"uids\":[\"1\"]}")).?.tool_error);
+    try testing.expectEqualStrings(ro, (try callJson(&reg, a, "move_messages", "{\"account\":\"ro\",\"directory\":\"INBOX\",\"destination\":\"X\",\"criteria\":\"ALL\",\"dry_run\":false}")).?.tool_error);
+    // Criteria default to a dry run, which read-only accounts may do: the
+    // call gets as far as the (unreachable) server.
+    try testing.expectEqualStrings(
+        "account \"ro\": cannot connect to 127.0.0.1:1",
+        (try callJson(&reg, a, "move_messages", "{\"account\":\"ro\",\"directory\":\"INBOX\",\"destination\":\"X\",\"criteria\":\"ALL\"}")).?.tool_error,
+    );
+    try testing.expectEqualStrings(
+        "account \"ro\": cannot connect to 127.0.0.1:1",
+        (try callJson(&reg, a, "copy_messages", "{\"account\":\"ro\",\"directory\":\"INBOX\",\"destination\":\"X\",\"uids\":[\"1\"],\"dry_run\":true}")).?.tool_error,
+    );
+}
+
+test "organization tools: argument errors never reach the server" {
+    var accts = testAccounts();
+    var reg = try testRegistry(&accts);
+    defer reg.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try testing.expectEqualStrings("mailbox name must not be empty", (try callJson(&reg, a, "create_mailbox", "{\"account\":\"rw\",\"name\":\"\"}")).?.invalid_params);
+    try testing.expectEqualStrings("mailbox name must not contain * or %", (try callJson(&reg, a, "create_mailbox", "{\"account\":\"rw\",\"name\":\"All*\"}")).?.invalid_params);
+    try testing.expectEqualStrings(
+        "mailbox name must be valid UTF-8 without control characters",
+        (try callJson(&reg, a, "rename_mailbox", "{\"account\":\"rw\",\"name\":\"X\",\"new_name\":\"Y\\r\\nZ\"}")).?.invalid_params,
+    );
+    const move = "{\"account\":\"rw\",\"directory\":\"INBOX\",\"destination\":\"X\"";
+    try testing.expectEqualStrings("pass either uids or criteria, not both", (try callJson(&reg, a, "move_messages", move ++ ",\"uids\":[\"1\"],\"criteria\":\"ALL\"}")).?.invalid_params);
+    try testing.expectEqualStrings("pass uids (from search) or criteria", (try callJson(&reg, a, "copy_messages", move ++ "}")).?.invalid_params);
+    try testing.expectEqualStrings("criteria must not contain CR, LF, or NUL", (try callJson(&reg, a, "move_messages", move ++ ",\"criteria\":\"ALL\\r\\nA1 DELETE INBOX\"}")).?.invalid_params);
+
+    var many: std.ArrayList(u8) = .empty;
+    try many.appendSlice(a, move ++ ",\"uids\":[");
+    for (1..5002) |i| try many.print(a, "{s}\"{d}\"", .{ if (i > 1) "," else "", i });
+    try many.appendSlice(a, "]}");
+    try testing.expectEqualStrings("at most 5000 messages per call; got 5001 uids", (try callJson(&reg, a, "move_messages", many.items)).?.invalid_params);
+}
+
+test "organization tools: schema requires account, directory, destination" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var jw: Stringify = .{ .writer = &aw.writer };
+    try writeList(&jw);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
+    defer parsed.deinit();
+    for (parsed.value.array.items) |t| {
+        if (!std.mem.eql(u8, t.object.get("name").?.string, "move_messages")) continue;
+        const schema = t.object.get("inputSchema").?.object;
+        const req = schema.get("required").?.array.items;
+        try testing.expectEqual(3, req.len);
+        try testing.expectEqualStrings("destination", req[2].string);
+        try testing.expect(schema.get("properties").?.object.get("dry_run") != null);
+        return;
+    }
+    return error.TestExpectedMoveMessages;
+}
+
+test "organization operations are never retried after a dropped connection" {
+    try testing.expect(!accounts.retriesAfterConnectionLoss(CreateOp));
+    try testing.expect(!accounts.retriesAfterConnectionLoss(RenameOp));
+    try testing.expect(!accounts.retriesAfterConnectionLoss(DeleteOp));
+    try testing.expect(!accounts.retriesAfterConnectionLoss(TransferOp));
+}
+
+test "bestEffort tolerates a server refusal only" {
+    try testing.expect(try bestEffort({}));
+    try testing.expect(!try bestEffort(error.ServerRejected));
+    try testing.expectError(error.ConnectionLost, bestEffort(error.ConnectionLost));
+}
+
+test "keepPresent keeps existing UIDs in input order without duplicates" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var present: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    for ([_]u32{ 3, 5, 9 }) |u| try present.put(a, u, {});
+    try testing.expectEqualSlices(u32, &.{ 9, 3, 5 }, try keepPresent(a, &.{ 9, 4, 3, 9, 5 }, &present));
+}
+
+test "review: a failed fallback move says which messages were moved, copied, untouched" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try testing.expectEqualStrings(
+        "500 of 1200 messages were moved; the next 500 were copied to \"Dest\" but not removed from \"Src\" (they may be flagged \\Deleted); the remaining 200 were not touched: STORE failed",
+        try partialMoveMessage(a, 500, 1200, 500, "Dest", "Src", "STORE failed"),
+    );
+    try testing.expectEqualStrings(
+        "0 of 3 messages were moved; the next 3 were copied to \"Dest\" but not removed from \"Src\" (they may be flagged \\Deleted): EXPUNGE failed",
+        try partialMoveMessage(a, 0, 3, 3, "Dest", "Src", "EXPUNGE failed"),
+    );
+}
+
+test "review: a name matching several folders after cleaning is ambiguous" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const boxes = [_]imap.Mailbox{
+        .{ .name = "INBOX", .delimiter = '/', .flags = &.{} },
+        .{ .name = "Fo&IAs-o", .delimiter = '/', .flags = &.{} }, // "Fo\u{200B}o"
+        .{ .name = "Fo&IA0-o", .delimiter = '/', .flags = &.{} }, // "Fo\u{200D}o"
+        .{ .name = "Ba&IAs-r", .delimiter = '/', .flags = &.{} }, // "Ba\u{200B}r"
+    };
+    try testing.expect(try ambiguousMailbox(a, &boxes, "Foo", "Foo"));
+    try testing.expect(!try ambiguousMailbox(a, &boxes, "Bar", "Bar"));
+    try testing.expect(!try ambiguousMailbox(a, &boxes, "Other", "Other"));
+    // An exact wire match wins; nothing to disambiguate.
+    try testing.expect(!try ambiguousMailbox(a, &boxes, "Fo\u{200B}o", "Fo&IAs-o"));
+}
+
+test "review: new folder names with invisible characters never reach the server" {
+    var accts = testAccounts();
+    var reg = try testRegistry(&accts);
+    defer reg.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const msg = "mailbox name must not contain invisible or control characters";
+    try testing.expectEqualStrings(msg, (try callJson(&reg, a, "create_mailbox", "{\"account\":\"rw\",\"name\":\"INBOX\\u200b\"}")).?.invalid_params);
+    try testing.expectEqualStrings(msg, (try callJson(&reg, a, "create_mailbox", "{\"account\":\"rw\",\"name\":\"C1\\u0085\"}")).?.invalid_params);
+    try testing.expectEqualStrings(msg, (try callJson(&reg, a, "rename_mailbox", "{\"account\":\"rw\",\"name\":\"X\",\"new_name\":\"Y\\u202e\"}")).?.invalid_params);
 }

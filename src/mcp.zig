@@ -240,7 +240,7 @@ test "tools/list and prompts round-trip" {
     var lines = std.mem.splitScalar(u8, got, '\n');
     const list = try std.json.parseFromSlice(std.json.Value, testing.allocator, lines.next().?, .{});
     defer list.deinit();
-    try testing.expectEqual(15, list.value.object.get("result").?.object.get("tools").?.array.items.len);
+    try testing.expectEqual(20, list.value.object.get("result").?.object.get("tools").?.array.items.len);
     try testing.expect(std.mem.find(u8, lines.next().?, "list_patches_of_a_series") != null);
     try testing.expect(std.mem.find(u8, lines.next().?, "\"role\":\"user\"") != null);
 }

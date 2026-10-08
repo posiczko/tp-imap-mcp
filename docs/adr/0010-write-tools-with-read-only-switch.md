@@ -24,3 +24,5 @@ mailbox flagged `\Drafts` (RFC 6154), otherwise `Drafts`.
 - The read-only guarantee depends on input validation (ADR 0011): a smuggled
   command in `criteria` would otherwise bypass it.
 - `create_message` works across servers without per-server code.
+- The folder and move/copy tools added later follow the same read-only
+  switch; their own safeguards are in [ADR 0021](0021-mailbox-organization-tools.md).

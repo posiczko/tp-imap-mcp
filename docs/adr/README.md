@@ -25,3 +25,4 @@ here. Superseded ADRs stay, marked "Superseded by NNNN".
 | [0018](0018-sanitize-model-bound-output.md) | Sanitize all model-bound output | Accepted |
 | [0019](0019-decoded-sanitized-header-values.md) | Return header values decoded and sanitized | Accepted |
 | [0020](0020-xoauth2-with-refresh-tokens-in-1password.md) | Support XOAUTH2 with refresh tokens kept in 1Password | Accepted |
+| [0021](0021-mailbox-organization-tools.md) | Add folder and move/copy tools with safe moves, protected folders and dry runs | Accepted |

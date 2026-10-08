@@ -320,6 +320,22 @@ pub const Registry = struct {
         return store.loadMailboxes(arena) catch |e| self.cacheMiss(idx, e);
     }
 
+    /// After CREATE/RENAME/DELETE (ADR 0021): refreshes the mailbox list,
+    /// which also drops cached headers of mailboxes that no longer exist. If
+    /// the refresh fails the list is marked stale instead; never fails.
+    pub fn mailboxesChanged(self: *Registry, idx: usize, arena: Allocator) void {
+        defer self.diag_len = 0; // the tool already succeeded
+        _ = self.mailboxList(idx, arena, true) catch {
+            if (self.cache(idx)) |store| store.markMailboxesStale() catch |e| self.cacheFailed(idx, e);
+        };
+    }
+
+    /// Drops cached headers of messages moved out of `mailbox`.
+    pub fn forgetMoved(self: *Registry, idx: usize, mailbox: []const u8, uidvalidity: u32, uids: []const u32) void {
+        const store = self.cache(idx) orelse return;
+        store.deleteMessages(mailbox, uidvalidity, uids) catch |e| self.cacheFailed(idx, e);
+    }
+
     fn cacheMiss(self: *Registry, idx: usize, err: anyerror) ?[]imap.Mailbox {
         self.cacheFailed(idx, err);
         return null;
@@ -494,6 +510,39 @@ test "fresh cached mailbox list is served without the server; clearCache empties
 
     try testing.expect(reg.clearCache(0));
     try testing.expectError(error.ConnectFailed, reg.mailboxList(0, a, false));
+}
+
+test "mailboxesChanged marks the list stale when the refresh fails; forgetMoved drops moved rows" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try testing.allocator.print(".zig-cache/tmp/{s}/cache", .{&tmp.sub_path});
+    defer testing.allocator.free(dir);
+
+    const pw = try testing.allocator.dupeSentinel(u8, "x", 0);
+    defer testing.allocator.free(pw);
+    var accounts = [_]config.Account{localAccount(pw, null)};
+    var reg: Registry = try .init(testing.allocator, testing.io, &accounts, .{ .cache_dir = dir, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = config.default_ca_file }, &no_filters_1);
+    defer reg.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const store = reg.cache(0).?;
+    try store.replaceMailboxes(a, &.{.{ .name = "INBOX", .delimiter = '/', .flags = &.{} }});
+    try store.putMessages("INBOX", 9, &.{
+        .{ .uid = 1, .size = 10, .data = "A: 1\r\n\r\n", .flags = null },
+        .{ .uid = 2, .size = 20, .data = "A: 2\r\n\r\n", .flags = null },
+    });
+
+    reg.forgetMoved(0, "INBOX", 9, &.{1});
+    const left = try store.getMessages(a, "INBOX", 9, &.{ 1, 2 });
+    try testing.expectEqual(1, left.len);
+    try testing.expectEqual(2, left[0].uid);
+
+    try testing.expect(try store.mailboxesFresh(3600));
+    reg.mailboxesChanged(0, a); // 127.0.0.1:1 is unreachable: falls back to stale
+    try testing.expect(!try store.mailboxesFresh(3600));
+    try testing.expectEqualStrings("", reg.diag());
 }
 
 test "corrupt cache file is rebuilt" {

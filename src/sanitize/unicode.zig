@@ -16,23 +16,25 @@ fn removed(cp: u21) bool {
     };
 }
 
+/// True if `clean` would return `text` unchanged (also for invalid UTF-8).
+pub fn isClean(text: []const u8) bool {
+    var view = std.unicode.Utf8View.init(text) catch return true;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (removed(cp) or cp == 0x2028 or cp == 0x2029) return false;
+    }
+    return true;
+}
+
 /// Cleaned copy of `text` (or `text` itself when nothing changes).
 /// U+2028/U+2029 become '\n'.
 pub fn clean(arena: Allocator, text: []const u8) Allocator.Error![]const u8 {
-    var view = std.unicode.Utf8View.init(text) catch return text; // caller guarantees UTF-8
-    var it = view.iterator();
-    var needs_copy = false;
-    while (it.nextCodepoint()) |cp| {
-        if (removed(cp) or cp == 0x2028 or cp == 0x2029) {
-            needs_copy = true;
-            break;
-        }
-    }
-    if (!needs_copy) return text;
+    if (isClean(text)) return text; // caller guarantees UTF-8
+    var view = std.unicode.Utf8View.initUnchecked(text);
 
     var out: std.ArrayList(u8) = .empty;
     try out.ensureTotalCapacity(arena, text.len);
-    it = view.iterator();
+    var it = view.iterator();
     while (it.nextCodepointSlice()) |slice| {
         const cp = std.unicode.utf8Decode(slice) catch unreachable;
         if (cp == 0x2028 or cp == 0x2029) {

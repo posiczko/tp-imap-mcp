@@ -28,6 +28,34 @@
 - [ ] **No offline test for the refresh-and-retry login path** (needs a fake
   IMAP server); covered only by the live OAuth check.
 
+## Mailbox organization (review, 2026-10-08)
+
+- [ ] **`mailboxName` has no test for DEL (0x7f).**
+- [ ] **A null delimiter lets `[Gmail]/X` through `targetReason`** (accounts
+  with no mailboxes).
+- [ ] **`isBelow` is case-sensitive for INBOX children.**
+- [ ] **Missing `organize` tests:** `\NonExistent`, `specialUse` flag case,
+  `batchCount(0)`, a range ending at u32 max within the cap.
+- [ ] **COPYUID reversed ranges are expanded ascending**; RFC 4315 pairs them
+  in copy order.
+- [ ] **`forgetMoved` is not tested with a mismatched uidvalidity**;
+  `mailboxesChanged`'s success path is covered only live.
+- [ ] **create/rename/delete don't mark the mailbox list stale after
+  `ConnectionLost`.**
+- [ ] **`directory`/`name` are validated only after the fresh LIST.**
+- [ ] **A dry run with more than 5000 matches does not warn** that the real
+  call will be refused.
+- [ ] **A move dry run skips the capability check.**
+- [ ] **The fallback STORE uses `+FLAGS`, not `+FLAGS.SILENT`.**
+- [ ] **`create_missing` creates the destination when 0 messages match.**
+- [ ] **The `delete_mailbox` description lacks the Gmail "removes the label"
+  note.**
+- [ ] **No fake-session seam:** handler paths (fallback move, rename child
+  mapping, delete refusal) lack unit tests.
+- [ ] **itest:** `.?` on `uid_map`/`PATH`; refusal checks don't assert the
+  reason; the README PASS count doesn't mention `--organize`.
+- [ ] **Gmail manual check pending** (labels, Trash, All Mail).
+
 ## Done (2026-10-07 cleanup)
 
 - [x] `create_message` is not retried after a lost connection (no duplicate drafts).

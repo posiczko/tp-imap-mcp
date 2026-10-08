@@ -8,6 +8,8 @@
 
 struct tpi_session {
   mailimap *imap;
+  int caps;       /* TPI_CAP_* mask */
+  int caps_known; /* caps fetched on this connection */
 };
 
 int tpi_map_error(int r);
@@ -557,4 +559,108 @@ int tpi_uid_store_flags(tpi_session *s, const uint32_t *uids, size_t uid_count, 
 
 int tpi_append(tpi_session *s, const char *mailbox, const char *data, size_t len) {
   return map_error(mailimap_append(s->imap, mailbox, NULL, NULL, data, len));
+}
+
+int tpi_create(tpi_session *s, const char *mailbox) {
+  return map_error(mailimap_create(s->imap, mailbox));
+}
+
+int tpi_rename(tpi_session *s, const char *from, const char *to) {
+  return map_error(mailimap_rename(s->imap, from, to));
+}
+
+int tpi_delete(tpi_session *s, const char *mailbox) {
+  return map_error(mailimap_delete(s->imap, mailbox));
+}
+
+int tpi_subscribe(tpi_session *s, const char *mailbox) {
+  return map_error(mailimap_subscribe(s->imap, mailbox));
+}
+
+int tpi_unsubscribe(tpi_session *s, const char *mailbox) {
+  return map_error(mailimap_unsubscribe(s->imap, mailbox));
+}
+
+int tpi_capabilities(tpi_session *s, int *caps) {
+  *caps = 0;
+  if (!s->caps_known) {
+    /* The result is a copy; libetpan keeps its own for mailimap_has_extension. */
+    struct mailimap_capability_data *data = NULL;
+    int r = mailimap_capability(s->imap, &data);
+    if (r != MAILIMAP_NO_ERROR)
+      return map_error(r);
+    mailimap_capability_data_free(data);
+    s->caps = (mailimap_has_extension(s->imap, "MOVE") ? TPI_CAP_MOVE : 0) |
+              (mailimap_has_extension(s->imap, "UIDPLUS") ? TPI_CAP_UIDPLUS : 0);
+    s->caps_known = 1;
+  }
+  *caps = s->caps;
+  return TPI_OK;
+}
+
+/* Flattens a set into (first, last) pairs. Returns 0, or -1 on memory. */
+static int set_ranges(struct mailimap_set *set, uint32_t **out, size_t *len) {
+  *out = NULL;
+  *len = 0;
+  if (set == NULL || set->set_list == NULL || clist_count(set->set_list) == 0)
+    return 0;
+  uint32_t *v = malloc(sizeof(uint32_t) * 2 * (size_t)clist_count(set->set_list));
+  if (v == NULL)
+    return -1;
+  size_t n = 0;
+  for (clistiter *it = clist_begin(set->set_list); it != NULL; it = clist_next(it)) {
+    struct mailimap_set_item *item = clist_content(it);
+    v[n++] = item->set_first;
+    v[n++] = item->set_last;
+  }
+  *out = v;
+  *len = n;
+  return 0;
+}
+
+int tpi_uid_transfer(tpi_session *s, const uint32_t *uids, size_t uid_count,
+                     const char *mailbox, int move, tpi_copyuid *out) {
+  memset(out, 0, sizeof(*out));
+  struct mailimap_set *set = uid_set(uids, uid_count);
+  if (set == NULL)
+    return TPI_ERR_MEMORY;
+  uint32_t uidvalidity = 0;
+  struct mailimap_set *src = NULL, *dst = NULL;
+  /* The uidplus variants send plain UID MOVE / UID COPY and only read a
+   * COPYUID code if the server sent one, so they suit every server. */
+  int r = move ? mailimap_uidplus_uid_move(s->imap, set, mailbox, &uidvalidity, &src, &dst)
+               : mailimap_uidplus_uid_copy(s->imap, set, mailbox, &uidvalidity, &src, &dst);
+  mailimap_set_free(set);
+  if (r != MAILIMAP_NO_ERROR)
+    return map_error(r);
+  int rc = TPI_OK;
+  if (uidvalidity != 0 && src != NULL && dst != NULL) {
+    if (set_ranges(src, &out->src, &out->src_len) != 0 ||
+        set_ranges(dst, &out->dst, &out->dst_len) != 0) {
+      tpi_copyuid_free(out);
+      rc = TPI_ERR_MEMORY;
+    } else {
+      out->uidvalidity = uidvalidity;
+    }
+  }
+  if (src != NULL)
+    mailimap_set_free(src);
+  if (dst != NULL)
+    mailimap_set_free(dst);
+  return rc;
+}
+
+void tpi_copyuid_free(tpi_copyuid *c) {
+  free(c->src);
+  free(c->dst);
+  memset(c, 0, sizeof(*c));
+}
+
+int tpi_uid_expunge(tpi_session *s, const uint32_t *uids, size_t uid_count) {
+  struct mailimap_set *set = uid_set(uids, uid_count);
+  if (set == NULL)
+    return TPI_ERR_MEMORY;
+  int r = mailimap_uid_expunge(s->imap, set);
+  mailimap_set_free(set);
+  return map_error(r);
 }

@@ -29,7 +29,8 @@ tp-imap-mcp exposes IMAP mailboxes to MCP clients (Claude Code, Claude Desktop, 
 | 📮 Multiple accounts | One server process, an `account` argument on every tool. |
 | 🔐 1Password credentials | Config is environment variables; values can be `op://` references resolved by `op run`. |
 | 🛡️ Verified TLS | Certificate chain checked against a CA bundle, SNI set, host name verified **before** the password is sent. |
-| 👀 Read-only accounts | `IMAP_<NAME>_READONLY=1` refuses the two write tools; reads never mark mail as seen. |
+| 🗂️ Mail organization | Create, rename/move and delete folders; move or copy messages by UID or by search criteria, with dry runs and protected system folders. |
+| 👀 Read-only accounts | `IMAP_<NAME>_READONLY=1` refuses every tool that changes the mailbox; reads never mark mail as seen. |
 | ⚡ Local cache | Mailbox list and message headers/sizes cached in SQLite under `~/.cache/tp-imap-mcp/`. |
 | 🔎 Full IMAP search | The model's IMAP `SEARCH` criteria are passed through, with input validation against command injection. |
 | 🙈 Sensitive-content filters | Password-reset and one-time-code emails (and anything you define) are withheld: the model learns they exist, never their content. On by default. |
@@ -132,6 +133,12 @@ op run --env-file imap.env -- zig build itest -- work
 # 0 failure(s)
 ```
 
+`--organize` also checks the folder and move/copy tools. It creates two folders named `tp-imap-mcp-itest-<random>`, appends one test message, moves, copies and renames, and removes everything again (it never touches other folders):
+
+```bash
+op run --env-file imap.env -- zig build itest -- work --organize
+```
+
 ### 6. Register with your MCP client
 
 <details open>
@@ -200,6 +207,7 @@ Ask your assistant things like:
 - "Find emails from alice@example.org since 1 October and summarize them."
 - "Flag the newest message from Bob." *(not on read-only accounts)*
 - "Draft a reply to that message." *(creates a draft; it never sends mail)*
+- "File every receipt from this year into Receipts/2026." *(not on read-only accounts)*
 
 <details>
 <summary>Talking to the server by hand (no MCP client)</summary>
@@ -363,6 +371,10 @@ Every tool except `list_accounts` takes an `account` argument.
 | `get_size` | Message size in bytes |
 | `get_keywords` / `change_keywords` | Read / add / remove IMAP flags and keywords |
 | `create_message` | Append a raw RFC 822 message to the Drafts folder |
+| `create_mailbox` | Create a folder (and subscribe to it) |
+| `rename_mailbox` | Rename a folder or move it under another parent |
+| `delete_mailbox` | Delete an empty folder |
+| `move_messages` / `copy_messages` | Move or copy messages by `uids` or by search `criteria`; criteria default to a dry run |
 | `clear_cache` | Delete the account's local cache |
 
 Per-UID results are aligned with the requested UIDs (`null` for UIDs that don't exist). Reading never sets `\Seen`. PGP/MIME messages are not decrypted; a marker is returned instead.
@@ -377,12 +389,26 @@ What the model sees, after filtering and sanitizing:
 | Too many UIDs at once | Later items become `[omitted: response size limit reached; request fewer UIDs]` |
 | Encoded headers (`=?UTF-8?B?…?=`) | Decoded, invisible characters removed, 2 KiB max per value |
 
+### Organizing mail
+
+The folder and move/copy tools ([ADR 0021](docs/adr/0021-mailbox-organization-tools.md)) follow a few rules:
+
+- **Bulk moves are previewed.** With `criteria`, `move_messages` and `copy_messages` only report the match count and the first 100 UIDs, unless `dry_run=false` is passed. With `uids` they act immediately. At most 5000 messages per call.
+- **Safe moves.** `MOVE` is used when the server supports it, otherwise `COPY` + `\Deleted` + `UID EXPUNGE` of exactly those messages. A server with neither MOVE nor UIDPLUS cannot move messages (copy still works).
+- **Protected folders.** INBOX, folders the server marks as special-use (Sent, Drafts, Trash, Junk/Spam, Archive, All Mail, …), the configured drafts folder used by `create_message`, and folders containing them are never renamed or deleted. Nothing is created inside Gmail's `[Gmail]/` tree. Messages *can* be moved to Trash or Spam; the result notes that those folders are purged automatically.
+- **Only empty folders are deleted.** Move the messages and subfolders out first.
+- **Missing destinations** are an error unless `create_missing=true`.
+- **Gmail:** folders are labels. Moving out of INBOX archives the message and applies the label; copying adds a label; every message stays in `[Gmail]/All Mail`. Moving out of All Mail is refused (use `copy_messages` to add a label).
+
+A typical exchange: *"Move all newsletters from news@example.com in INBOX to Newsletters"* → the assistant runs a dry run (`matched: 42`), shows you the count, then repeats the call with `dry_run=false`.
+
 ## 🔒 Security model
 
 - **TLS:** the server certificate must chain to the CA bundle and match the configured host; otherwise the connection is refused and no credentials are sent.
 - **Secrets:** only in memory, from the environment `op run` provides; never logged or returned by tools. The server zeroes its own copy on exit; the environment copy lives as long as the process.
 - **Command injection:** search criteria cannot contain CR/LF/NUL; UIDs, keywords, and header names are validated.
-- **Read-only accounts:** write tools refuse before contacting the server.
+- **Read-only accounts:** write tools refuse before contacting the server (dry runs of `move_messages` / `copy_messages` are allowed).
+- **Organizing:** see [Organizing mail](#organizing-mail): previews for bulk moves, no plain `EXPUNGE`, protected system folders, and no automatic retry of a folder or move/copy command after a dropped connection.
 - **Cache:** `~/.cache/tp-imap-mcp/<account>.sqlite3`, mode `0600`. It contains message headers (subjects, addresses); delete it any time or set `TP_IMAP_MCP_CACHE=0`.
 - **Sensitive mail:** filtered messages' bodies are never downloaded; their subjects are never shown.
 - **Prompt injection:** output is plain text with hidden HTML content and invisible Unicode removed. Text hidden only by CSS colour (white on white) or off-screen positioning is *not* detected.
@@ -406,6 +432,9 @@ What the model sees, after filtering and sanitizing:
 | A folder created elsewhere doesn't show up | The mailbox list is cached for an hour; ask for a refresh. |
 | `TP_IMAP_MCP_FILTERS: unknown filter "x"` | The name isn't built in or defined in `filters.zon`; fix the name or use `none`. |
 | `…/filters.zon: filter "x" rule N condition M: …` | Fix the named rule (exactly one of `.contains`/`.glob`/`.regex`, non-empty patterns, valid regex) and restart. |
+| `… is a special-use folder (\Sent) and cannot be renamed or deleted` | Working as intended (ADR 0021); reorganize system folders in your mail client. |
+| `the server supports neither MOVE nor UIDPLUS…` | The server cannot move messages safely; use `copy_messages` and delete the originals in your mail client. |
+| `connection lost while moving or copying messages…` | The outcome is unknown; search both folders before retrying. |
 | An email shows `[withheld by filter "…"]` | Working as intended. Disable for an account with `IMAP_<NAME>_FILTERS=none` (or keep just one, e.g. `IMAP_<NAME>_FILTERS=password_reset` to let the assistant read login codes), or narrow the rules in `filters.zon`. |
 | `… must be a number of bytes >= 1024` | Fix `TP_IMAP_MCP_MAX_BODY_BYTES` / `TP_IMAP_MCP_MAX_RESPONSE_BYTES`. |
 
@@ -427,6 +456,7 @@ src/
 ├── main.zig            entry point, config loading
 ├── mcp.zig             JSON-RPC / MCP stdio loop
 ├── tools.zig           tool handlers (descriptions.zig: model-facing texts)
+├── organize.zig        folder protection, move strategy, batching (ADR 0021)
 ├── accounts.zig        per-account sessions, reconnect, cache, drafts discovery
 ├── config.zig          environment → accounts and settings
 ├── validate.zig        argument validation (injection defense)
@@ -471,6 +501,7 @@ CI (`.github/workflows/ci.yml`) runs the unit tests, an optimized build, and a s
 - [x] Attachment listing (`list_attachments`, metadata only)
 - [x] **OAuth (XOAUTH2)** for Microsoft 365 / Outlook.com and Gmail — [spec](docs/superpowers/specs/2026-10-07-oauth2-design.md) · [ADR 0020](docs/adr/0020-xoauth2-with-refresh-tokens-in-1password.md) · [Gmail runbook](docs/runbooks/gmail-xoauth2.md)
 - [x] Built-in `one_time_codes` filter (2FA codes, sign-in links, verification emails), on by default
+- [x] Mail organization: folders and move/copy — [spec](docs/superpowers/specs/2026-10-08-mailbox-organization-design.md) · [ADR 0021](docs/adr/0021-mailbox-organization-tools.md)
 - [ ] Deferred minor issues — see [docs/TODO.md](docs/TODO.md)
 
 ## 🤝 Contributing

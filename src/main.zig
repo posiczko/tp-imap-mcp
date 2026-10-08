@@ -95,6 +95,7 @@ fn authCommand(init: std.process.Init, arena: std.mem.Allocator, args: []const [
 }
 
 test {
+    _ = @import("organize.zig");
     _ = @import("accounts.zig");
     _ = @import("cache/sqlite.zig");
     _ = @import("cache/store.zig");
