@@ -41,9 +41,12 @@ tp-imap-mcp exposes IMAP mailboxes to MCP clients (Claude Code, Claude Desktop, 
 ```bash
 brew install zig libetpan ca-certificates 1password-cli
 zig build -Doptimize=safe
-cp imap.env.example imap.env        # edit: account names + op:// references
+mkdir -p ~/.config/tp-imap-mcp
+cp imap.env.example ~/.config/tp-imap-mcp/imap.env    # edit: account names + op:// references
+chmod 600 ~/.config/tp-imap-mcp/imap.env
+ln -s ~/.config/tp-imap-mcp/imap.env imap.env         # so repo commands can say --env-file imap.env
 op run --env-file imap.env -- zig build itest -- <account>     # optional live check
-claude mcp add --scope user imap -- op run --env-file "$PWD/imap.env" -- "$PWD/zig-out/bin/tp_imap_mcp"
+claude mcp add --scope user imap -- op run --env-file "$HOME/.config/tp-imap-mcp/imap.env" -- "$PWD/zig-out/bin/tp_imap_mcp"
 ```
 
 The full walkthrough follows.
@@ -90,9 +93,17 @@ op read "op://Private/Work IMAP/username"
 
 ### 4. Write `imap.env`
 
+Keep it in the per-user config directory, next to `filters.zon` and `organize.md`:
+
 ```bash
-cp imap.env.example imap.env
+mkdir -p ~/.config/tp-imap-mcp
+cp imap.env.example ~/.config/tp-imap-mcp/imap.env
+chmod 600 ~/.config/tp-imap-mcp/imap.env
+ln -s ~/.config/tp-imap-mcp/imap.env imap.env    # optional: lets the repo commands below use --env-file imap.env
 ```
+
+> [!NOTE]
+> Why not in the repository? The MCP client starts the server from this file on every launch. In `~/.config` it survives `git clean -fdx`, a fresh clone, or deleting the checkout. The file holds only account names and `op://` references (no secrets), but mode `600` keeps it private anyway. A plain `imap.env` in the repository root also works (it is git-ignored); then use that path when registering the server.
 
 The example defines three accounts: a plain IMAP server, Gmail with an app
 password and a Google account with XOAUTH2. Keep only the blocks you use, and
@@ -146,7 +157,7 @@ op run --env-file imap.env -- zig build itest -- work --organize
 
 ```bash
 claude mcp add --scope user imap -- \
-  op run --env-file /absolute/path/to/tp-imap-mcp/imap.env -- \
+  op run --env-file "$HOME/.config/tp-imap-mcp/imap.env" -- \
   /absolute/path/to/tp-imap-mcp/zig-out/bin/tp_imap_mcp
 
 claude mcp list          # should show "imap" as connected
@@ -166,7 +177,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
   "mcpServers": {
     "imap": {
       "command": "/opt/homebrew/bin/op",
-      "args": ["run", "--env-file", "/absolute/path/to/tp-imap-mcp/imap.env", "--",
+      "args": ["run", "--env-file", "/Users/you/.config/tp-imap-mcp/imap.env", "--",
                "/absolute/path/to/tp-imap-mcp/zig-out/bin/tp_imap_mcp"]
     }
   }
@@ -184,7 +195,7 @@ The server speaks MCP over **stdio** (newline-delimited JSON-RPC 2.0). Configure
 
 ```
 command: op
-args:    run --env-file /absolute/path/to/imap.env -- /absolute/path/to/zig-out/bin/tp_imap_mcp
+args:    run --env-file /Users/you/.config/tp-imap-mcp/imap.env -- /absolute/path/to/zig-out/bin/tp_imap_mcp
 ```
 
 </details>
@@ -242,7 +253,7 @@ npx @modelcontextprotocol/inspector op run --env-file "$PWD/imap.env" -- "$PWD/z
 
 ## ⚙️ Configuration
 
-All configuration is environment variables (usually via `op run --env-file imap.env`).
+All configuration is environment variables, usually from `~/.config/tp-imap-mcp/imap.env` via `op run --env-file` (see [Write `imap.env`](#4-write-imapenv)).
 
 | Variable | Required | Meaning |
 |---|---|---|
