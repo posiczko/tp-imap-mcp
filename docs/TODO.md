@@ -56,6 +56,20 @@
   reason; the README PASS count doesn't mention `--organize`.
 - [ ] **Gmail manual check pending** (labels, Trash, All Mail).
 
+## From live use (2026-10-08)
+
+- [ ] **Large results overflow the client.** One 4,746-message
+  `move_messages` returned 134 KB (almost all `uid_map`); `list_mailboxes "*"`
+  on ~600 folders 54 KB; `organize_mailbox` with `limit=50` 57 KB. *Fix:* cap
+  `uid_map` like the dry-run preview (count + first N pairs) and keep these
+  results under the response budget.
+- [ ] **No bulk folder status.** `mailboxes_status` takes one folder, so
+  auditing 184 folders took ~600 calls. *Fix:* accept several folders or a
+  LIST pattern and return counts for each.
+- [ ] **No record of the server's own folder changes.** 26 folders vanished
+  outside the MCP and it could not show what it had or had not done. *Fix:*
+  log create/rename/delete/move calls (account, name, result) locally.
+
 ## Done (2026-10-07 cleanup)
 
 - [x] `create_message` is not retried after a lost connection (no duplicate drafts).
