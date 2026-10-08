@@ -36,8 +36,11 @@ dry run and carried out only when they confirm.
   plan. "Needs attention" sets `\Flagged`.
 - Withheld messages accept only "keep", enforced by the server.
 - Execution requires the dry run's `plan_hash` (SHA-256 over account, folder,
-  UIDVALIDITY and the sorted actions), so what runs is exactly what was
-  shown; the UIDVALIDITY must still match.
+  UIDVALIDITY, the sorted actions and which of the plan's UIDs did not
+  exist), so what runs is exactly what was shown: a message that arrives
+  later under a planned UID changes the hash. The UIDVALIDITY must still
+  match, and a dry run too large for one response is refused rather than
+  shown cut off.
 - Kept and flagged messages get the keyword `$TpOrganized`; the next
   `organize_mailbox` skips them unless `include_reviewed=true`.
 - Moves reuse ADR 0021's machinery (MOVE, else COPY + UID EXPUNGE, else

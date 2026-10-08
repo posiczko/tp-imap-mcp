@@ -110,8 +110,11 @@ fn parseUid(s: []const u8) ?u32 {
 }
 
 /// 16 lowercase hex characters: SHA-256 over account, directory,
-/// UIDVALIDITY and the actions sorted by UID (independent of input order).
-pub fn planHash(arena: Allocator, account: []const u8, directory: []const u8, uidvalidity: u32, actions: []const Action) Allocator.Error![16]u8 {
+/// UIDVALIDITY, the actions sorted by UID (independent of input order), and
+/// the plan's UIDs that do not exist in the folder. Binding the missing UIDs
+/// means a message that arrives after the dry run under a planned UID
+/// changes the hash, so the plan cannot act on mail the user never saw.
+pub fn planHash(arena: Allocator, account: []const u8, directory: []const u8, uidvalidity: u32, actions: []const Action, missing: []const u32) Allocator.Error![16]u8 {
     const sorted = try arena.dupe(Action, actions);
     std.mem.sort(Action, sorted, {}, struct {
         fn lt(_: void, a: Action, b: Action) bool {
@@ -132,6 +135,13 @@ pub fn planHash(arena: Allocator, account: []const u8, directory: []const u8, ui
         h.update(@tagName(a.kind));
         h.update(&.{0});
         h.update(a.destination orelse "");
+    }
+    const gone = try arena.dupe(u32, missing);
+    std.mem.sort(u32, gone, {}, std.sort.asc(u32));
+    h.update(&.{1});
+    for (gone) |u| {
+        h.update(&.{0});
+        h.update(std.mem.print(&num, "{d}", .{u}) catch unreachable);
     }
     var digest: [32]u8 = undefined;
     h.final(&digest);
@@ -317,16 +327,28 @@ test "planHash ignores action order and changes with any action" {
     const a = arena_state.allocator();
     const one = [_]Action{ .{ .uid = 7, .kind = .move, .destination = "Receipts" }, .{ .uid = 8, .kind = .delete } };
     const swapped = [_]Action{ one[1], one[0] };
-    const h = try planHash(a, "work", "INBOX", 42, &one);
+    const h = try planHash(a, "work", "INBOX", 42, &one, &.{});
     try testing.expectEqual(16, h.len);
     for (h) |c| try testing.expect(std.ascii.isDigit(c) or (c >= 'a' and c <= 'f'));
-    try testing.expectEqualStrings(&h, &(try planHash(a, "work", "INBOX", 42, &swapped)));
+    try testing.expectEqualStrings(&h, &(try planHash(a, "work", "INBOX", 42, &swapped, &.{})));
     const other_dest = [_]Action{ .{ .uid = 7, .kind = .move, .destination = "Receipt" }, one[1] };
     const other_kind = [_]Action{ one[0], .{ .uid = 8, .kind = .keep } };
-    try testing.expect(!std.mem.eql(u8, &h, &(try planHash(a, "work", "INBOX", 42, &other_dest))));
-    try testing.expect(!std.mem.eql(u8, &h, &(try planHash(a, "work", "INBOX", 42, &other_kind))));
-    try testing.expect(!std.mem.eql(u8, &h, &(try planHash(a, "work", "INBOX", 43, &one))));
-    try testing.expect(!std.mem.eql(u8, &h, &(try planHash(a, "home", "INBOX", 42, &one))));
+    try testing.expect(!std.mem.eql(u8, &h, &(try planHash(a, "work", "INBOX", 42, &other_dest, &.{}))));
+    try testing.expect(!std.mem.eql(u8, &h, &(try planHash(a, "work", "INBOX", 42, &other_kind, &.{}))));
+    try testing.expect(!std.mem.eql(u8, &h, &(try planHash(a, "work", "INBOX", 43, &one, &.{}))));
+    try testing.expect(!std.mem.eql(u8, &h, &(try planHash(a, "home", "INBOX", 42, &one, &.{}))));
+}
+
+test "review: planHash changes when a missing UID appears (new mail after the dry run)" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const plan = [_]Action{ .{ .uid = 7, .kind = .keep }, .{ .uid = 900, .kind = .delete } };
+    // Dry run: 900 did not exist yet. Execute: a new message received UID 900.
+    const at_dry_run = try planHash(a, "work", "INBOX", 42, &plan, &.{900});
+    const at_execute = try planHash(a, "work", "INBOX", 42, &plan, &.{});
+    try testing.expect(!std.mem.eql(u8, &at_dry_run, &at_execute));
+    try testing.expectEqualStrings(&at_dry_run, &(try planHash(a, "work", "INBOX", 42, &plan, &.{900})));
 }
 
 test "group orders moves by destination, then delete, flag, keep" {

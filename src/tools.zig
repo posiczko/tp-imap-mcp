@@ -1090,6 +1090,14 @@ fn organizeMailbox(ctx: *Ctx) Failure![]const u8 {
 }
 
 const PlanMessage = struct { uid: []const u8, from: []const u8, subject: []const u8 };
+const PlanGroup = struct { action: []const u8, destination: ?[]const u8 = null, count: usize, messages: ?[]const PlanMessage = null };
+
+/// The dry run's JSON, or null when it exceeds `max` bytes: a plan shown cut
+/// off could be confirmed by a user who never saw all of it.
+fn dryRunJson(arena: Allocator, hash: [16]u8, groups: []const PlanGroup, missing: []const []const u8, max: usize) Allocator.Error!?[]const u8 {
+    const json = try Stringify.valueAlloc(arena, .{ .dry_run = true, .plan_hash = &hash, .groups = groups, .missing = missing }, .{ .emit_null_optional_fields = false });
+    return if (json.len > max) null else json;
+}
 
 /// apply_organization (spec §2.2): validates the model's plan, shows it as a
 /// dry run, or executes it when `execute` and the dry run's plan_hash match.
@@ -1139,10 +1147,6 @@ fn applyOrganization(ctx: *Ctx) Failure![]const u8 {
     }
     if (moves_out) if (try organize.moveSourceReason(ctx.arena, src_box)) |r| return ctx.failed("{s}", .{r});
 
-    const hash = try triage.planHash(ctx.arena, ctx.registry.accounts[idx].name, source, uidvalidity, actions);
-    if (execute and !std.mem.eql(u8, given_hash, &hash))
-        return ctx.failed("plan_hash does not match these actions; run a dry run (execute=false) and show it to the user again", .{});
-
     const uids = try ctx.arena.alloc(u32, actions.len);
     for (actions, uids) |a, *u| u.* = a.uid;
     var op: ApplyOp = .{
@@ -1151,6 +1155,9 @@ fn applyOrganization(ctx: *Ctx) Failure![]const u8 {
         .active = ctx.registry.filtersFor(idx),
         .expected_uidvalidity = uidvalidity,
         .execute = execute,
+        .account = ctx.registry.accounts[idx].name,
+        .actions = actions,
+        .given_hash = given_hash,
         .groups = groups,
         .dests = dests,
         .steps = try executionOrder(ctx.arena, groups),
@@ -1170,9 +1177,8 @@ fn applyOrganization(ctx: *Ctx) Failure![]const u8 {
     for (uids) |u| if (!op.present.contains(u)) try missing.append(ctx.arena, try ctx.arena.print("{d}", .{u}));
 
     if (!execute) {
-        const Out = struct { action: []const u8, destination: ?[]const u8 = null, count: usize, messages: ?[]PlanMessage = null };
         const header_items = try alignToUids(ctx.arena, uids, op.headers.result);
-        const out = try ctx.arena.alloc(Out, groups.len);
+        const out = try ctx.arena.alloc(PlanGroup, groups.len);
         for (groups, dests_shown, out) |g, ds, *o| {
             var count: usize = 0;
             var listed: std.ArrayList(PlanMessage) = .empty;
@@ -1195,7 +1201,9 @@ fn applyOrganization(ctx: *Ctx) Failure![]const u8 {
                 .messages = if (g.kind == .keep) null else listed.items,
             };
         }
-        return Stringify.valueAlloc(ctx.arena, .{ .dry_run = true, .plan_hash = &hash, .groups = out, .missing = missing.items }, .{ .emit_null_optional_fields = false });
+        const max = ctx.registry.settings.max_response_bytes;
+        return try dryRunJson(ctx.arena, op.hash, out, missing.items, max) orelse
+            ctx.failed("the dry run is larger than the response limit ({d} bytes) and would be shown cut off; split the plan into several apply_organization calls with fewer actions", .{max});
     }
 
     const Moved = struct { destination: []const u8, count: usize };
@@ -1663,6 +1671,12 @@ const ApplyOp = struct {
     dests: []const [:0]const u8,
     /// Group indices in execution order (from `executionOrder`).
     steps: []const usize,
+    /// For the plan hash, computed once the folder's messages are known.
+    account: []const u8,
+    actions: []const triage.Action,
+    /// The caller's plan_hash (execute only).
+    given_hash: []const u8,
+    hash: [16]u8 = undefined,
 
     uidvalidity: u32 = 0,
     refused: ?[]const u8 = null,
@@ -1697,6 +1711,13 @@ const ApplyOp = struct {
                 self.refused = try self.arena.print("message {d} is withheld by filter \"{s}\"; only \"keep\" is allowed", .{ u, name });
                 return;
             };
+        }
+        var missing: std.ArrayList(u32) = .empty;
+        for (self.actions) |a| if (!self.present.contains(a.uid)) try missing.append(self.arena, a.uid);
+        self.hash = try triage.planHash(self.arena, self.account, self.headers.mailbox, self.expected_uidvalidity, self.actions, missing.items);
+        if (self.execute and !std.mem.eql(u8, self.given_hash, &self.hash)) {
+            self.refused = "plan_hash does not match these actions or the folder's messages changed since the dry run; run a dry run (execute=false) and show it to the user again";
+            return;
         }
         self.counts = try self.arena.alloc(usize, self.groups.len);
         for (self.groups, self.counts) |g, *n| n.* = self.presentCount(g.uids);
@@ -2361,6 +2382,9 @@ test "applyFailureMessage says what was done, where it stopped, and what was not
         .groups = &groups,
         .dests = &.{ "Receipts", "Trash", "" },
         .steps = try executionOrder(a, &groups),
+        .account = "rw",
+        .actions = &.{},
+        .given_hash = "",
     };
     for ([_]u32{ 1, 2, 3, 4, 5 }) |u| try op.present.put(a, u, {});
     op.completed = 1; // flag done; stopped in the move
@@ -2377,6 +2401,26 @@ test "applyFailureMessage says what was done, where it stopped, and what was not
         "the plan stopped at marking reviewed messages: boom. Completed: flag 1; move 3 to \"Receipts\"; delete 1 (to \"Trash\"). Not attempted: nothing.",
         try applyFailureMessage(a, &op, &dests_shown, "INBOX", "boom"),
     );
+}
+
+test "review: a dry run larger than max_response_bytes is refused, not cut off" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const subject: [2000]u8 = @splat('x');
+    var msgs: [100]PlanMessage = undefined;
+    for (&msgs, 0..) |*m, i| m.* = .{ .uid = try a.print("{d}", .{i + 1}), .from = "a@example.org", .subject = &subject };
+    const groups = [_]PlanGroup{
+        .{ .action = "delete", .destination = "Trash", .count = msgs.len, .messages = &msgs },
+        .{ .action = "keep", .count = 3 },
+    };
+    const hash = "0123456789abcdef".*;
+    try testing.expect(try dryRunJson(a, hash, &groups, &.{}, 64 * 1024) == null);
+    const small = [_]PlanGroup{.{ .action = "delete", .destination = "Trash", .count = 1, .messages = msgs[0..1] }};
+    const json = (try dryRunJson(a, hash, &small, &.{"9"}, 64 * 1024)).?;
+    try testing.expect(json.len <= 64 * 1024);
+    try testing.expect(std.mem.find(u8, json, "\"plan_hash\":\"0123456789abcdef\"") != null);
+    try testing.expect(std.mem.find(u8, json, "\"missing\":[\"9\"]") != null);
 }
 
 test "apply_organization is never retried (gathering may be); its schema lists the actions" {

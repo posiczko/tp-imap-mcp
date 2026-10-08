@@ -116,12 +116,18 @@ by outcome, with subjects shown as in `organize_mailbox`:
 ```
 
 - `plan_hash`: lowercase hex of the first 8 bytes of SHA-256 over a canonical
-  serialization of account, directory, uidvalidity, and the actions sorted by
-  UID (so it does not depend on the order of `actions`).
+  serialization of account, directory, uidvalidity, the actions sorted by
+  UID (so it does not depend on the order of `actions`), and the sorted UIDs
+  of the plan that do not exist in the folder (so a message that later
+  arrives under such a UID changes the hash and cannot be acted on unseen).
+- The dry run must fit in `max_response_bytes`; a larger one is refused
+  ("split the plan into several apply_organization calls with fewer
+  actions") so the user never confirms a plan shown cut off.
 
 Execute (`execute=true`):
 - Refused on read-only accounts.
-- `plan_hash` must equal the hash of this call's actions; otherwise refuse
+- `plan_hash` must equal the hash of this call's actions and the folder's
+  current messages; otherwise refuse
   ("the plan differs from the dry run; run a dry run and show it again").
 - Order: flag (`UID STORE +FLAGS (\Flagged)`), then moves per destination and
   the delete move to Trash (the existing batched move path: MOVE, else
