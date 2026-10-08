@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 const Stringify = std.json.Stringify;
 
 const Registry = @import("accounts.zig").Registry;
+const audit = @import("audit.zig");
 const prompts = @import("prompts.zig");
 const text_util = @import("text.zig");
 const tools = @import("tools.zig");
@@ -49,6 +50,18 @@ pub fn serve(gpa: Allocator, registry: *Registry, in: *std.Io.Reader, out: *std.
         }
         if (at_eof) return;
     }
+}
+
+/// Appends one audit line for a tools/call (ADR 0023); never fails the call.
+fn recordCall(arena: Allocator, registry: *Registry, tool: []const u8, args: ?std.json.ObjectMap, outcome: tools.Outcome, started: std.Io.Timestamp) Allocator.Error!void {
+    const audit_log = registry.audit orelse return;
+    const ms = started.durationTo(std.Io.Timestamp.now(registry.io, .awake)).toMilliseconds();
+    const logged: audit.Outcome = switch (outcome) {
+        .content => |t| .{ .ok = t },
+        .tool_error => |t| .{ .tool_error = t },
+        .invalid_params => |t| .{ .invalid_params = t },
+    };
+    audit_log.append(try audit.entry(arena, std.Io.Timestamp.now(registry.io, .real).toSeconds(), ms, tool, args, logged));
 }
 
 /// Returns the serialized response, or null for notifications.
@@ -114,8 +127,10 @@ pub fn handle(arena: Allocator, registry: *Registry, msg: []const u8) Allocator.
             .null => null,
             else => return try errorResponse(arena, rid, invalid_params, "arguments must be an object"),
         } else null;
-        const outcome = (try tools.call(registry, arena, name_v.string, args)) orelse
-            return try errorResponse(arena, rid, invalid_params, try arena.print("unknown tool \"{s}\"", .{name_v.string}));
+        const started = std.Io.Timestamp.now(registry.io, .awake);
+        const outcome: tools.Outcome = try tools.call(registry, arena, name_v.string, args) orelse
+            .{ .invalid_params = try arena.print("unknown tool \"{s}\"", .{name_v.string}) };
+        try recordCall(arena, registry, name_v.string, args, outcome, started);
         const raw_text, const is_error = switch (outcome) {
             .content => |t| .{ t, false },
             .tool_error => |t| .{ t, true },
@@ -284,4 +299,48 @@ test "tool text with invalid UTF-8 is still a JSON string" {
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"caf\u{FFFD}\"}],\"isError\":false}}",
         got,
     );
+}
+
+test "every tools/call is appended to the audit log, unknown tools too" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.mem.printSentinel(&path_buf, "{s}/audit.log", .{dir_buf[0..dir_len]}, 0);
+
+    var accounts = [_]@import("config.zig").Account{.{
+        .name = "a", .host = "h", .port = 993, .login = "me@example.org", .password = @constCast(&[_:0]u8{}),
+        .readonly = false, .drafts = null,
+    }};
+    var reg: Registry = try .init(testing.allocator, testing.io, &accounts, .{ .cache_dir = null, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = @import("config.zig").default_ca_file }, &.{&.{}});
+    defer reg.deinit();
+    var audit_log: audit.Log = .{ .path = path };
+    reg.audit = &audit_log;
+
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    _ = try handle(a, &reg,
+        \\{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"whoami","arguments":{"account":"a"}}}
+    );
+    _ = try handle(a, &reg,
+        \\{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"nope","arguments":{}}}
+    );
+    _ = try handle(a, &reg,
+        \\{"jsonrpc":"2.0","id":3,"method":"ping"}
+    );
+
+    const got = try tmp.dir.readFileAlloc(testing.io, "audit.log", testing.allocator, .limited(4096));
+    defer testing.allocator.free(got);
+    var lines = std.mem.splitScalar(u8, got, '\n');
+    const first = lines.next().?;
+    try testing.expect(std.mem.find(u8, first, "\"tool\":\"whoami\",\"account\":\"a\"") != null);
+    try testing.expect(std.mem.find(u8, first, "\"outcome\":\"ok\",\"result\":{\"bytes\":14}") != null);
+    try testing.expect(std.mem.find(u8, first, "me@example.org") == null); // a read: size only
+    const second = lines.next().?;
+    try testing.expect(std.mem.find(u8, second, "\"tool\":\"nope\"") != null);
+    try testing.expect(std.mem.find(u8, second, "\"outcome\":\"invalid_params\",\"message\":\"unknown tool \\\"nope\\\"\"") != null);
+    try testing.expectEqualStrings("", lines.next().?); // ping is not a tool call
+    try testing.expect(lines.next() == null);
 }

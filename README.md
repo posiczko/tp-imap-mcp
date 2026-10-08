@@ -250,6 +250,7 @@ npx @modelcontextprotocol/inspector op run --env-file "$PWD/imap.env" -- "$PWD/z
 | Clear cached data | Ask the assistant to clear the cache, or `rm ~/.cache/tp-imap-mcp/<account>.sqlite3*` |
 | Disable the cache | `TP_IMAP_MCP_CACHE=0` |
 | Logs | The server logs to **stderr**; MCP clients usually keep it in their MCP log (Claude Code: `claude --debug`) |
+| See what the MCP did | Every tool call is in `~/.local/state/tp-imap-mcp/audit.log` (JSON Lines), e.g. `grep '"rename_mailbox\|"delete_mailbox' ~/.local/state/tp-imap-mcp/audit.log` |
 
 ## ⚙️ Configuration
 
@@ -280,6 +281,8 @@ All configuration is environment variables, usually from `~/.config/tp-imap-mcp/
 | `XDG_CONFIG_HOME` | no | Config location base for `filters.zon` (default `~/.config`) |
 | `TP_IMAP_MCP_MAX_BODY_BYTES` | no | Max bytes per message body after sanitizing (default `32768`, min `1024`) |
 | `TP_IMAP_MCP_MAX_RESPONSE_BYTES` | no | Size budget per per-UID tool response (default `131072`, min `1024`) |
+| `TP_IMAP_MCP_AUDIT` | no | `0` disables the audit log of tool calls |
+| `TP_IMAP_MCP_AUDIT_FILE` | no | Audit log path, absolute (default `$XDG_STATE_HOME/tp-imap-mcp/audit.log`, i.e. `~/.local/state/…`) |
 
 `<NAME>` is the upper-cased account name. Invalid configuration stops startup with a message naming the variable — never its value.
 
@@ -445,6 +448,7 @@ Write your own instructions in `~/.config/tp-imap-mcp/organize.md`, or `organize
 - **Read-only accounts:** write tools refuse before contacting the server (dry runs of `move_messages` / `copy_messages` / `apply_organization` are allowed).
 - **Organizing:** see [Organizing mail](#organizing-mail): previews for bulk moves, no plain `EXPUNGE`, protected system folders, and no automatic retry of a folder or move/copy command after a dropped connection.
 - **Cache:** `~/.cache/tp-imap-mcp/<account>.sqlite3`, mode `0600`. It contains message headers (subjects, addresses); delete it any time or set `TP_IMAP_MCP_CACHE=0`.
+- **Audit log:** `~/.local/state/tp-imap-mcp/audit.log`, mode `0600`: one JSON line per tool call with its arguments (search criteria and folder names included), outcome and duration. Changes are logged with their result; reads only with the result's size, so no message content is written. Rotates at 10 MB (two old files kept); `TP_IMAP_MCP_AUDIT=0` disables it. See ADR 0023.
 - **Sensitive mail:** filtered messages' bodies are never downloaded; their subjects are never shown.
 - **Prompt injection:** output is plain text with hidden HTML content and invisible Unicode removed. Text hidden only by CSS colour (white on white) or off-screen positioning is *not* detected.
 

@@ -27,3 +27,4 @@ here. Superseded ADRs stay, marked "Superseded by NNNN".
 | [0020](0020-xoauth2-with-refresh-tokens-in-1password.md) | Support XOAUTH2 with refresh tokens kept in 1Password | Accepted |
 | [0021](0021-mailbox-organization-tools.md) | Add folder and move/copy tools with safe moves, protected folders and dry runs | Accepted |
 | [0022](0022-organize-mailbox-two-phase-plan.md) | Organize a mailbox as a model-classified, server-validated two-phase plan | Accepted |
+| [0023](0023-audit-log-of-tool-calls.md) | Keep a local audit log of every tool call | Accepted |

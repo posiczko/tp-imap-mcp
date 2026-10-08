@@ -120,6 +120,10 @@ pub const Settings = struct {
     max_body_bytes: usize = default_max_body_bytes,
     /// Running budget per per-UID tool response (ADR 0018).
     max_response_bytes: usize = default_max_response_bytes,
+    /// Audit log of tool calls (ADR 0023): `$XDG_STATE_HOME/tp-imap-mcp/
+    /// audit.log`, `$HOME/.local/state/…`, or TP_IMAP_MCP_AUDIT_FILE; null
+    /// when disabled or no location could be determined.
+    audit_file: ?[:0]const u8 = null,
 };
 
 pub const default_max_body_bytes = 32 * 1024;
@@ -132,8 +136,27 @@ pub const app_dir = "tp-imap-mcp";
 
 /// Reads TP_IMAP_MCP_CACHE, TP_IMAP_MCP_MAILBOX_TTL, TP_IMAP_MCP_CA_FILE,
 /// TP_IMAP_MCP_MAX_BODY_BYTES, TP_IMAP_MCP_MAX_RESPONSE_BYTES,
-/// XDG_CONFIG_HOME, XDG_CACHE_HOME, HOME.
+/// TP_IMAP_MCP_AUDIT, TP_IMAP_MCP_AUDIT_FILE, XDG_CONFIG_HOME,
+/// XDG_CACHE_HOME, XDG_STATE_HOME, HOME.
 pub fn loadSettings(arena: Allocator, env: anytype, diag: *std.Io.Writer) Error!Settings {
+    var settings = try loadCoreSettings(arena, env, diag);
+    settings.audit_file = try auditFile(arena, env, diag);
+    return settings;
+}
+
+/// The audit log path, or null when disabled or nowhere to put it.
+fn auditFile(arena: Allocator, env: anytype, diag: *std.Io.Writer) Error!?[:0]const u8 {
+    if (!try boolVar(env, diag, "TP_IMAP_MCP_AUDIT", true)) return null;
+    const key = "TP_IMAP_MCP_AUDIT_FILE";
+    if (nonEmpty(env, key)) |p| {
+        if (!std.fs.path.isAbsolute(p)) return fail(diag, "{s} must be an absolute path", .{key});
+        return try arena.dupeSentinel(u8, p, 0);
+    }
+    const dir = try xdgDir(arena, env, "XDG_STATE_HOME", ".local/state") orelse return null;
+    return try std.fs.path.joinZ(arena, &.{ dir, "audit.log" });
+}
+
+fn loadCoreSettings(arena: Allocator, env: anytype, diag: *std.Io.Writer) Error!Settings {
     const ttl_key = "TP_IMAP_MCP_MAILBOX_TTL";
     const ttl: i64 = if (nonEmpty(env, ttl_key)) |v|
         std.fmt.parseInt(u31, v, 10) catch return fail(diag, "{s} must be a number of seconds >= 0", .{ttl_key})
@@ -352,6 +375,26 @@ fn settingsFrom(arena: Allocator, e: TestEnv) !Settings {
     var buf: [256]u8 = undefined;
     var diag: std.Io.Writer = .fixed(&buf);
     return loadSettings(arena, e, &diag);
+}
+
+test "settings: audit log in XDG state, file override, disable switch" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const home = try settingsFrom(a, testEnv(.{.{ "HOME", "/home/me" }}));
+    try testing.expectEqualStrings("/home/me/.local/state/tp-imap-mcp/audit.log", home.audit_file.?);
+    const xdg = try settingsFrom(a, testEnv(.{ .{ "XDG_STATE_HOME", "/x/state" }, .{ "HOME", "/home/me" } }));
+    try testing.expectEqualStrings("/x/state/tp-imap-mcp/audit.log", xdg.audit_file.?);
+    const file = try settingsFrom(a, testEnv(.{ .{ "TP_IMAP_MCP_AUDIT_FILE", "/var/log/imap.jsonl" }, .{ "HOME", "/home/me" } }));
+    try testing.expectEqualStrings("/var/log/imap.jsonl", file.audit_file.?);
+    const off = try settingsFrom(a, testEnv(.{ .{ "TP_IMAP_MCP_AUDIT", "0" }, .{ "HOME", "/home/me" } }));
+    try testing.expect(off.audit_file == null);
+    const nowhere = try settingsFrom(a, testEnv(.{}));
+    try testing.expect(nowhere.audit_file == null);
+
+    try expectInvalidSettings(testEnv(.{.{ "TP_IMAP_MCP_AUDIT_FILE", "audit.log" }}), "TP_IMAP_MCP_AUDIT_FILE must be an absolute path");
+    try expectInvalidSettings(testEnv(.{.{ "TP_IMAP_MCP_AUDIT", "maybe" }}), "TP_IMAP_MCP_AUDIT must be one of 1/true/yes/0/false/no");
 }
 
 test "settings: XDG cache location, HOME fallback, disable switch, TTL" {

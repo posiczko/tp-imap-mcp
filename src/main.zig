@@ -5,7 +5,9 @@ const config = @import("config.zig");
 const filter_load = @import("filter/load.zig");
 const mcp = @import("mcp.zig");
 const oauth_flow = @import("oauth/flow.zig");
-const Registry = @import("accounts.zig").Registry;
+const accounts_mod = @import("accounts.zig");
+const Registry = accounts_mod.Registry;
+const audit = @import("audit.zig");
 
 pub fn main(init: std.process.Init) !u8 {
     var err_buf: [1024]u8 = undefined;
@@ -36,9 +38,10 @@ pub fn main(init: std.process.Init) !u8 {
         try stderr.flush();
         return 1;
     }
-    try stderr.print("serving {d} account(s) on stdio; cache: {s}; filters:", .{
+    try stderr.print("serving {d} account(s) on stdio; cache: {s}; audit: {s}; filters:", .{
         accounts.len,
         settings.cache_dir orelse if (settings.cache_dir_unavailable) "off (set HOME or XDG_CACHE_HOME)" else "off",
+        settings.audit_file orelse "off",
     });
     for (accounts, active_filters) |a, fs| {
         try stderr.print(" {s}=", .{a.name});
@@ -50,6 +53,13 @@ pub fn main(init: std.process.Init) !u8 {
 
     var registry: Registry = try .init(init.gpa, init.io, accounts, settings, active_filters);
     defer registry.deinit();
+    var audit_log: audit.Log = undefined;
+    if (settings.audit_file) |path| {
+        audit_log = .{ .path = path };
+        // A missing directory only means unlogged calls; Log.append warns once.
+        accounts_mod.makePath(arena, std.fs.path.dirname(path) orelse "/") catch {};
+        registry.audit = &audit_log;
+    }
 
     var in_buf: [64 * 1024]u8 = undefined;
     var stdin_reader = std.Io.File.stdin().reader(init.io, &in_buf);
@@ -95,6 +105,7 @@ fn authCommand(init: std.process.Init, arena: std.mem.Allocator, args: []const [
 }
 
 test {
+    _ = @import("audit.zig");
     _ = @import("triage.zig");
     _ = @import("organize.zig");
     _ = @import("accounts.zig");

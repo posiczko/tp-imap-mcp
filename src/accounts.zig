@@ -13,6 +13,7 @@ const token = @import("oauth/token.zig");
 const provider = @import("oauth/provider.zig");
 const text = @import("text.zig");
 const unicode = @import("sanitize/unicode.zig");
+const audit = @import("audit.zig");
 
 pub const Session = imap.Session;
 pub const Error = imap.Error || error{LoginFailed};
@@ -34,6 +35,8 @@ pub const Registry = struct {
     /// Active sensitive-content filters per account (ADR 0017), one entry per
     /// account. Required at init so filtering can never be silently off.
     active_filters: []const []const *const Filter,
+    /// Audit log of tool calls (ADR 0023); null when disabled.
+    audit: ?*audit.Log = null,
     /// Human-readable cause of the most recent failure (no secrets).
     diag_buf: [512]u8 = undefined,
     diag_len: usize = 0,
@@ -412,7 +415,7 @@ fn openCache(gpa: Allocator, dir: []const u8, path: [:0]const u8) !Store {
 }
 
 /// mkdir -p with mode 0700 for any component it creates.
-fn makePath(gpa: Allocator, dir: []const u8) !void {
+pub fn makePath(gpa: Allocator, dir: []const u8) !void {
     const z = try gpa.dupeSentinel(u8, dir, 0);
     defer gpa.free(z);
     var i: usize = 1;
