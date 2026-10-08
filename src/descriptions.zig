@@ -10,8 +10,9 @@ pub const list_accounts =
     \\Return:
     \\    [ {"name": "tetra", "login": "me@example.org", "readonly": false,
     \\       "filters": ["password_reset"]}, ... ]
-    \\    readonly accounts refuse change_keywords, create_message and the
-    \\    folder and move/copy tools (dry runs are allowed).
+    \\    readonly accounts refuse change_keywords, create_message, the
+    \\    folder and move/copy tools, and executing apply_organization (dry
+    \\    runs are allowed).
     \\    filters are the account's active sensitive-content filters. Messages
     \\    they match are withheld: get_text/get_html return
     \\    [withheld by filter "<name>"] and get_header shows only date and from.
@@ -375,6 +376,64 @@ pub const copy_messages =
     \\Notes:
     \\    On Gmail, copying adds the destination label; the message stays
     \\    where it was. Refused for read-only accounts (dry runs are allowed).
+;
+
+pub const organize_mailbox =
+    \\Start organizing a folder (default INBOX): returns the organizing
+    \\instructions (the user's organize.md, or the built-in default), the
+    \\folders messages may be moved to, the Trash folder, and the newest
+    \\messages with sanitized headers and a short text snippet. Read-only.
+    \\
+    \\Args:
+    \\    directory: the folder to organize (default "INBOX")
+    \\    limit: how many of the newest messages, 1-200 (default 50)
+    \\    criteria: optional IMAP SEARCH criteria, e.g. "UNSEEN"
+    \\    include_reviewed: true to include messages an earlier plan kept or
+    \\        flagged (they carry the keyword $TpOrganized and are skipped
+    \\        otherwise)
+    \\
+    \\Return:
+    \\    {"account", "directory", "uidvalidity", "instructions",
+    \\     "instructions_source", "folders": [...], "trash": "Trash" | null,
+    \\     "messages": [{"uid", "date", "from", "to", "subject", "size",
+    \\       "flags", "snippet"} | {"uid", "date", "from", "withheld"}],
+    \\     "omitted": N, "next": "..."}
+    \\
+    \\Next: classify every message following "instructions", then call
+    \\apply_organization with execute=false, show the user the grouped plan,
+    \\and execute only after the user confirms. Messages with "withheld" are
+    \\hidden by a sensitive-content filter and must be "keep".
+;
+
+pub const apply_organization =
+    \\Check, preview, or carry out an organizing plan for messages returned by
+    \\organize_mailbox.
+    \\
+    \\Args:
+    \\    directory, uidvalidity: as returned by organize_mailbox
+    \\    actions: one per message, e.g.
+    \\        [{"uid": "4711", "action": "move", "destination": "Receipts"},
+    \\         {"uid": "4712", "action": "delete"},   (moved to Trash)
+    \\         {"uid": "4713", "action": "flag"},     (sets \Flagged)
+    \\         {"uid": "4714", "action": "keep"}]
+    \\    execute: false (default) returns the plan grouped by action with a
+    \\        plan_hash and changes nothing; true carries it out
+    \\    plan_hash: required with execute=true; must come from a dry run of
+    \\        exactly these actions
+    \\
+    \\Return:
+    \\    dry run: {"dry_run": true, "plan_hash": "...", "groups": [{"action",
+    \\      "destination", "count", "messages": [{"uid", "from", "subject"}]}],
+    \\      "missing": [uids that no longer exist]}
+    \\    executed: {"executed": true, "flagged", "moved": [{"destination",
+    \\      "count"}], "deleted", "kept", "missing", "note"}
+    \\
+    \\Notes:
+    \\    Always show the dry run to the user and execute only after they
+    \\    confirm. Nothing is ever permanently deleted. Withheld messages
+    \\    accept only "keep". Executing is refused for read-only accounts.
+    \\    Kept and flagged messages get the keyword $TpOrganized so the next
+    \\    organize_mailbox skips them.
 ;
 
 pub const clear_cache =

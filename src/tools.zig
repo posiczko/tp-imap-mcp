@@ -15,6 +15,7 @@ const unicode = @import("sanitize/unicode.zig");
 const limit = @import("sanitize/limit.zig");
 const mutf7 = @import("imap/mutf7.zig");
 const organize = @import("organize.zig");
+const triage = @import("triage.zig");
 const imap = @import("imap/session.zig");
 const text = @import("text.zig");
 const validate = @import("validate.zig");
@@ -82,6 +83,18 @@ const Ctx = struct {
     fn booleanOr(ctx: *Ctx, key: []const u8, default: bool) Failure!bool {
         if (ctx.get(key) == null) return default;
         return ctx.boolean(key);
+    }
+
+    fn integer(ctx: *Ctx, key: []const u8, min: i64, max: i64) Failure!i64 {
+        const v = ctx.get(key) orelse return ctx.invalid("missing required argument \"{s}\"", .{key});
+        if (v != .integer) return ctx.invalid("argument \"{s}\" must be an integer", .{key});
+        if (v.integer < min or v.integer > max) return ctx.invalid("argument \"{s}\" must be between {d} and {d}", .{ key, min, max });
+        return v.integer;
+    }
+
+    fn integerOr(ctx: *Ctx, key: []const u8, default: i64, min: i64, max: i64) Failure!i64 {
+        if (ctx.get(key) == null) return default;
+        return ctx.integer(key, min, max);
     }
 
     fn boolean(ctx: *Ctx, key: []const u8) Failure!bool {
@@ -174,6 +187,17 @@ const Ctx = struct {
         return ctx.registry.mailboxList(idx, ctx.arena, true) catch |err| return ctx.imapFailed(err);
     }
 
+    /// Wire name of a folder named in a plan action (UTF-8), resolved like
+    /// `mailbox()` against `boxes`.
+    fn wireName(ctx: *Ctx, boxes: []const imap.Mailbox, utf8: []const u8) Failure![:0]const u8 {
+        try ctx.check(validate.mailbox(utf8));
+        const encoded = mutf7.encode(ctx.arena, utf8) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidUtf8 => return ctx.invalid("destination \"{s}\" is not valid UTF-8", .{utf8}),
+        };
+        return ctx.arena.dupeSentinel(u8, try resolveMailbox(ctx.arena, boxes, utf8, encoded), 0);
+    }
+
     /// Runs an IMAP operation; maps failures to a tool error.
     fn imapRun(ctx: *Ctx, idx: usize, op: anytype) Failure!void {
         ctx.registry.run(idx, op) catch |err| return ctx.imapFailed(err);
@@ -190,7 +214,14 @@ const Ctx = struct {
     }
 };
 
-const ParamKind = enum { string, string_array, boolean };
+const ParamKind = enum {
+    string,
+    string_array,
+    boolean,
+    integer,
+    /// apply_organization's `actions`: [{uid, action, destination?}].
+    actions,
+};
 
 const Param = struct {
     name: []const u8,
@@ -264,6 +295,21 @@ pub const tools = [_]Tool{
     .{ .name = "delete_mailbox", .description = desc.delete_mailbox, .params = &.{ p_account, p_folder }, .handler = deleteMailbox },
     .{ .name = "move_messages", .description = desc.move_messages, .params = &transfer_params, .handler = moveMessages },
     .{ .name = "copy_messages", .description = desc.copy_messages, .params = &transfer_params, .handler = copyMessages },
+    .{ .name = "organize_mailbox", .description = desc.organize_mailbox, .params = &.{
+        p_account,
+        .{ .name = "directory", .kind = .string, .description = "Folder to organize", .default = "INBOX" },
+        .{ .name = "limit", .kind = .integer, .description = "Newest messages to return, 1-200 (default 50)", .required = false },
+        .{ .name = "criteria", .kind = .string, .description = "Optional IMAP SEARCH criteria narrowing the candidates, e.g. \"UNSEEN\" or \"SINCE 1-Oct-2026\"", .required = false },
+        .{ .name = "include_reviewed", .kind = .boolean, .description = "true to include messages an earlier plan kept or flagged ($TpOrganized)", .required = false },
+    }, .handler = organizeMailbox },
+    .{ .name = "apply_organization", .description = desc.apply_organization, .params = &.{
+        p_account,
+        .{ .name = "directory", .kind = .string, .description = "The folder passed to organize_mailbox" },
+        .{ .name = "uidvalidity", .kind = .integer, .description = "uidvalidity returned by organize_mailbox" },
+        .{ .name = "actions", .kind = .actions, .description = "One action per message: move (with destination), delete (to Trash), flag, or keep" },
+        .{ .name = "execute", .kind = .boolean, .description = "true to perform the plan; default false (dry run)", .required = false },
+        .{ .name = "plan_hash", .kind = .string, .description = "plan_hash from the dry run; required with execute=true", .required = false },
+    }, .handler = applyOrganization },
     .{ .name = "clear_cache", .description = desc.clear_cache, .params = &.{p_account}, .handler = clearCache },
 };
 
@@ -299,6 +345,24 @@ pub fn writeList(jw: *Stringify) Stringify.Error!void {
                     try jw.write("array");
                     try jw.objectField("items");
                     try jw.write(.{ .type = "string" });
+                },
+                .integer => {
+                    try jw.objectField("type");
+                    try jw.write("integer");
+                },
+                .actions => {
+                    try jw.objectField("type");
+                    try jw.write("array");
+                    try jw.objectField("items");
+                    try jw.write(.{
+                        .type = "object",
+                        .properties = .{
+                            .uid = .{ .type = "string" },
+                            .action = .{ .type = "string", .@"enum" = [_][]const u8{ "move", "delete", "flag", "keep" } },
+                            .destination = .{ .type = "string" },
+                        },
+                        .required = [_][]const u8{ "uid", "action" },
+                    });
                 },
             }
             try jw.objectField("description");
@@ -886,21 +950,21 @@ fn transfer(ctx: *Ctx, move: bool) Failure![]const u8 {
         if (err == error.OutOfMemory) return error.OutOfMemory;
         const d = ctx.registry.diag();
         const why = if (d.len > 0) d else @errorName(err);
-        const msg = if (op.pending > 0)
-            try partialMoveMessage(ctx.arena, op.done, op.matched.len, op.pending, dest_shown, source_shown, why)
-        else if (op.done > 0)
-            try ctx.arena.print("{d} of {d} messages were {s} before the error: {s}", .{ op.done, op.matched.len, if (move) "moved" else "copied", why })
+        const msg = if (op.progress.pending > 0)
+            try partialMoveMessage(ctx.arena, op.progress.done, op.matched.len, op.progress.pending, dest_shown, source_shown, why)
+        else if (op.progress.done > 0)
+            try ctx.arena.print("{d} of {d} messages were {s} before the error: {s}", .{ op.progress.done, op.matched.len, if (move) "moved" else "copied", why })
         else
             try ctx.arena.dupe(u8, why);
         if (op.created) ctx.registry.mailboxesChanged(idx, ctx.arena);
-        if (move and op.done > 0) ctx.registry.forgetMoved(idx, source, op.uidvalidity, op.matched[0..op.done]);
+        if (move and op.progress.done > 0) ctx.registry.forgetMoved(idx, source, op.uidvalidity, op.matched[0..op.progress.done]);
         return ctx.failed("{s}", .{msg});
     };
     if (op.refused) |r| return ctx.failed("{s}", .{r});
     if (op.matched.len > organize.max_messages and !dry_run)
         return ctx.failed("{d} messages match; at most {d} per call. Narrow the criteria or split the work.", .{ op.matched.len, organize.max_messages });
     if (op.created) ctx.registry.mailboxesChanged(idx, ctx.arena);
-    if (move and op.done > 0) ctx.registry.forgetMoved(idx, source, op.uidvalidity, op.matched[0..op.done]);
+    if (move and op.progress.done > 0) ctx.registry.forgetMoved(idx, source, op.uidvalidity, op.matched[0..op.progress.done]);
 
     if (dry_run) {
         const preview = op.matched[0..@min(op.matched.len, organize.dry_run_preview)];
@@ -909,13 +973,294 @@ fn transfer(ctx: *Ctx, move: bool) Failure![]const u8 {
         return ctx.json(.{ .dry_run = true, .matched = op.matched.len, .uids = strs, .source = source_shown, .destination = dest_shown, .note = note });
     }
     var uid_map: ?[]UidPairJson = null;
-    if (op.map_complete and op.pairs.items.len > 0) {
-        const m = try ctx.arena.alloc(UidPairJson, op.pairs.items.len);
-        for (op.pairs.items, m) |pair, *o| o.* = .{ .from = try ctx.arena.print("{d}", .{pair.from}), .to = try ctx.arena.print("{d}", .{pair.to}) };
+    if (op.progress.map_complete and op.progress.pairs.items.len > 0) {
+        const m = try ctx.arena.alloc(UidPairJson, op.progress.pairs.items.len);
+        for (op.progress.pairs.items, m) |pair, *o| o.* = .{ .from = try ctx.arena.print("{d}", .{pair.from}), .to = try ctx.arena.print("{d}", .{pair.to}) };
         uid_map = m;
     }
-    if (move) return ctx.json(.{ .moved = op.done, .source = source_shown, .destination = dest_shown, .uid_map = uid_map, .note = note });
-    return ctx.json(.{ .copied = op.done, .source = source_shown, .destination = dest_shown, .uid_map = uid_map, .note = note });
+    if (move) return ctx.json(.{ .moved = op.progress.done, .source = source_shown, .destination = dest_shown, .uid_map = uid_map, .note = note });
+    return ctx.json(.{ .copied = op.progress.done, .source = source_shown, .destination = dest_shown, .uid_map = uid_map, .note = note });
+}
+
+/// First value of header `name`, decoded and sanitized; "" when absent.
+fn firstField(arena: Allocator, hs: []const headers.Header, name: []const u8) Allocator.Error![]const u8 {
+    for (hs) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return displayValue(arena, h.value);
+    return "";
+}
+
+const OrganizeItem = struct {
+    uid: []const u8,
+    date: []const u8,
+    from: []const u8,
+    to: ?[]const u8 = null,
+    subject: ?[]const u8 = null,
+    size: ?u32 = null,
+    flags: ?[]const []const u8 = null,
+    snippet: ?[]const u8 = null,
+    withheld: ?[]const u8 = null,
+};
+
+const organize_next = "Classify every message using `instructions`: one action each (move with a destination from `folders`, delete, flag, or keep). Then call apply_organization with execute=false, show the user the grouped plan, and call it again with execute=true and the plan_hash only after the user confirms.";
+
+/// organize_mailbox (spec §2.1): instructions, folders and the newest
+/// candidate messages for the model to classify. Read-only.
+fn organizeMailbox(ctx: *Ctx) Failure![]const u8 {
+    const idx = try ctx.account();
+    const limit_n: usize = @intCast(try ctx.integerOr("limit", triage.default_limit, 1, triage.max_limit));
+    const include_reviewed = try ctx.booleanOr("include_reviewed", false);
+    var command: []const u8 = if (include_reviewed) "ALL" else "NOT KEYWORD " ++ triage.reviewed_keyword;
+    if (ctx.get("criteria") != null) {
+        const criteria = try ctx.string("criteria");
+        try ctx.check(validate.criteria(criteria));
+        command = try ctx.arena.print("{s} ({s})", .{ command, criteria });
+    }
+    const instructions = switch (try triage.loadInstructions(ctx.arena, ctx.registry.io, ctx.registry.settings.config_dir, ctx.registry.accounts[idx].name)) {
+        .ok => |i| i,
+        .problem => |p| return ctx.failed("{s}", .{p}),
+    };
+
+    const boxes = try ctx.freshList(idx);
+    const mailbox = try ctx.mailbox("directory", "INBOX");
+    const shown = try displayName(ctx.arena, mailbox);
+    const box = organize.find(boxes, mailbox) orelse return ctx.failed("mailbox \"{s}\" does not exist", .{shown});
+    if (!organize.selectable(box)) return ctx.failed("\"{s}\" cannot hold messages (\\Noselect)", .{shown});
+
+    var op: GatherOp = .{
+        .arena = ctx.arena,
+        .headers = .{ .arena = ctx.arena, .registry = ctx.registry, .idx = idx, .mailbox = mailbox, .uids = &.{} },
+        .active = ctx.registry.filtersFor(idx),
+        .command = try ctx.arena.printSentinel("CHARSET UTF-8 {s}", .{command}, 0),
+        .limit = limit_n,
+    };
+    try ctx.imapRun(idx, &op);
+
+    const choices = try triage.folderChoices(ctx.arena, boxes, mailbox);
+    const folders = try ctx.arena.alloc([]const u8, choices.len);
+    var fixed: usize = limit.jsonLen(instructions.text) + 512;
+    for (choices, folders) |c, *f| {
+        f.* = try displayName(ctx.arena, c.name);
+        fixed += limit.jsonLen(f.*) + 4;
+    }
+    const trash: ?[]const u8 = if (triage.trashFolder(boxes)) |t| try displayName(ctx.arena, t.name) else null;
+
+    const header_items = try alignToUids(ctx.arena, op.uids, op.headers.result);
+    const flag_items = try alignToUids(ctx.arena, op.uids, op.flags);
+    const body_items = try alignToUids(ctx.arena, op.uids, op.bodies);
+    var budget: limit.Budget = .init(ctx.registry.settings.max_response_bytes -| fixed);
+    var messages: std.ArrayList(OrganizeItem) = .empty;
+    var omitted: usize = 0;
+    for (op.uids, header_items, flag_items, body_items) |u, h, f, b| {
+        const raw = (h orelse continue).data orelse continue; // vanished meanwhile
+        const hs = try headers.parse(ctx.arena, raw);
+        var item: OrganizeItem = .{
+            .uid = try ctx.arena.print("{d}", .{u}),
+            .date = try firstField(ctx.arena, hs, "date"),
+            .from = try firstField(ctx.arena, hs, "from"),
+        };
+        if (op.withheld.get(u)) |name| {
+            item.withheld = name;
+        } else {
+            item.to = try firstField(ctx.arena, hs, "to");
+            item.subject = try firstField(ctx.arena, hs, "subject");
+            item.size = h.?.size;
+            item.flags = if (f) |x| x.flags else null;
+            const rendered = if (b) |x| body.render(ctx.arena, x.data orelse "", .plain, triage.partial_bytes) catch "" else "";
+            item.snippet = try triage.snippet(ctx.arena, rendered);
+        }
+        const size = limit.jsonLen(item.date) + limit.jsonLen(item.from) + limit.jsonLen(item.to orelse "") +
+            limit.jsonLen(item.subject orelse "") + limit.jsonLen(item.snippet orelse "") + 160;
+        if (!admitItem(&budget, size, item.withheld)) {
+            omitted += 1;
+            continue;
+        }
+        try messages.append(ctx.arena, item);
+    }
+    return Stringify.valueAlloc(ctx.arena, .{
+        .account = ctx.registry.accounts[idx].name,
+        .directory = shown,
+        .uidvalidity = op.uidvalidity,
+        .instructions = instructions.text,
+        .instructions_source = instructions.source,
+        .folders = folders,
+        .trash = trash,
+        .messages = messages.items,
+        .omitted = omitted,
+        .next = organize_next,
+    }, .{ .emit_null_optional_fields = false });
+}
+
+const PlanMessage = struct { uid: []const u8, from: []const u8, subject: []const u8 };
+
+/// apply_organization (spec §2.2): validates the model's plan, shows it as a
+/// dry run, or executes it when `execute` and the dry run's plan_hash match.
+fn applyOrganization(ctx: *Ctx) Failure![]const u8 {
+    const idx = try ctx.account();
+    const uidvalidity: u32 = @intCast(try ctx.integer("uidvalidity", 1, std.math.maxInt(u32)));
+    const actions = switch (try triage.parseActions(ctx.arena, ctx.get("actions"))) {
+        .ok => |a| a,
+        .problem => |p| return ctx.invalid("{s}", .{p}),
+    };
+    const execute = try ctx.booleanOr("execute", false);
+    if (execute and ctx.get("plan_hash") == null)
+        return ctx.invalid("execute=true needs the plan_hash from a dry run (execute=false)", .{});
+    const given_hash = if (execute) try ctx.string("plan_hash") else "";
+    if (execute) try ctx.writable(idx);
+
+    const boxes = try ctx.freshList(idx);
+    const source = try ctx.mailbox("directory", null);
+    const source_shown = try displayName(ctx.arena, source);
+    const src_box = organize.find(boxes, source) orelse return ctx.failed("mailbox \"{s}\" does not exist", .{source_shown});
+    if (!organize.selectable(src_box)) return ctx.failed("\"{s}\" cannot hold messages (\\Noselect)", .{source_shown});
+
+    const groups = try triage.group(ctx.arena, actions);
+    const dests = try ctx.arena.alloc([:0]const u8, groups.len);
+    const dests_shown = try ctx.arena.alloc([]const u8, groups.len);
+    var moves_out = false;
+    for (groups, dests, dests_shown) |g, *d, *ds| {
+        d.* = "";
+        ds.* = "";
+        switch (g.kind) {
+            .move => {
+                d.* = try ctx.wireName(boxes, g.destination.?);
+                if (try triage.destinationProblem(ctx.arena, boxes, source, d.*, g.destination.?)) |p| return ctx.failed("{s}", .{p});
+                ds.* = try displayName(ctx.arena, d.*);
+                moves_out = true;
+            },
+            .delete => {
+                const t = triage.trashFolder(boxes) orelse
+                    return ctx.failed("this account has no Trash folder (\\Trash), so \"delete\" is not available", .{});
+                if (organize.sameMailbox(boxes, source, t.name)) return ctx.failed("\"{s}\" is the Trash folder; \"delete\" is not available here", .{source_shown});
+                d.* = try ctx.arena.dupeSentinel(u8, t.name, 0);
+                ds.* = try displayName(ctx.arena, t.name);
+                moves_out = true;
+            },
+            .flag, .keep => {},
+        }
+    }
+    if (moves_out) if (try organize.moveSourceReason(ctx.arena, src_box)) |r| return ctx.failed("{s}", .{r});
+
+    const hash = try triage.planHash(ctx.arena, ctx.registry.accounts[idx].name, source, uidvalidity, actions);
+    if (execute and !std.mem.eql(u8, given_hash, &hash))
+        return ctx.failed("plan_hash does not match these actions; run a dry run (execute=false) and show it to the user again", .{});
+
+    const uids = try ctx.arena.alloc(u32, actions.len);
+    for (actions, uids) |a, *u| u.* = a.uid;
+    var op: ApplyOp = .{
+        .arena = ctx.arena,
+        .headers = .{ .arena = ctx.arena, .registry = ctx.registry, .idx = idx, .mailbox = source, .uids = uids },
+        .active = ctx.registry.filtersFor(idx),
+        .expected_uidvalidity = uidvalidity,
+        .execute = execute,
+        .groups = groups,
+        .dests = dests,
+        .steps = try executionOrder(ctx.arena, groups),
+    };
+    ctx.registry.run(idx, &op) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        const d = ctx.registry.diag();
+        const why = if (d.len > 0) d else @errorName(err);
+        const msg = try applyFailureMessage(ctx.arena, &op, dests_shown, source_shown, why);
+        if (op.moved.items.len > 0) ctx.registry.forgetMoved(idx, source, op.uidvalidity, op.moved.items);
+        return ctx.failed("{s}", .{msg});
+    };
+    if (op.refused) |r| return ctx.failed("{s}", .{r});
+    if (op.moved.items.len > 0) ctx.registry.forgetMoved(idx, source, op.uidvalidity, op.moved.items);
+
+    var missing: std.ArrayList([]const u8) = .empty;
+    for (uids) |u| if (!op.present.contains(u)) try missing.append(ctx.arena, try ctx.arena.print("{d}", .{u}));
+
+    if (!execute) {
+        const Out = struct { action: []const u8, destination: ?[]const u8 = null, count: usize, messages: ?[]PlanMessage = null };
+        const header_items = try alignToUids(ctx.arena, uids, op.headers.result);
+        const out = try ctx.arena.alloc(Out, groups.len);
+        for (groups, dests_shown, out) |g, ds, *o| {
+            var count: usize = 0;
+            var listed: std.ArrayList(PlanMessage) = .empty;
+            for (g.uids) |u| {
+                if (!op.present.contains(u)) continue;
+                count += 1;
+                if (g.kind == .keep) continue;
+                const i = std.mem.findScalar(u32, uids, u).?;
+                const hs = try headers.parse(ctx.arena, header_items[i].?.data orelse "");
+                try listed.append(ctx.arena, .{
+                    .uid = try ctx.arena.print("{d}", .{u}),
+                    .from = try firstField(ctx.arena, hs, "from"),
+                    .subject = try firstField(ctx.arena, hs, "subject"),
+                });
+            }
+            o.* = .{
+                .action = @tagName(g.kind),
+                .destination = if (ds.len > 0) ds else null,
+                .count = count,
+                .messages = if (g.kind == .keep) null else listed.items,
+            };
+        }
+        return Stringify.valueAlloc(ctx.arena, .{ .dry_run = true, .plan_hash = &hash, .groups = out, .missing = missing.items }, .{ .emit_null_optional_fields = false });
+    }
+
+    const Moved = struct { destination: []const u8, count: usize };
+    var moved: std.ArrayList(Moved) = .empty;
+    var deleted: usize = 0;
+    var flagged: usize = 0;
+    var kept: usize = 0;
+    for (groups, dests_shown, op.counts) |g, ds, n| switch (g.kind) {
+        .move => try moved.append(ctx.arena, .{ .destination = ds, .count = n }),
+        .delete => deleted = n,
+        .flag => flagged = n,
+        .keep => kept = n,
+    };
+    const note: ?[]const u8 = if (op.keyword_refused)
+        "the server refused the $TpOrganized keyword; kept and flagged messages will be offered again by organize_mailbox"
+    else
+        null;
+    return Stringify.valueAlloc(ctx.arena, .{
+        .executed = true,
+        .flagged = flagged,
+        .moved = moved.items,
+        .deleted = deleted,
+        .kept = kept,
+        .missing = missing.items,
+        .note = note,
+    }, .{ .emit_null_optional_fields = false });
+}
+
+/// What an interrupted plan did and did not do (spec §2.2).
+fn applyFailureMessage(arena: Allocator, op: *const ApplyOp, dests_shown: []const []const u8, source_shown: []const u8, why: []const u8) Allocator.Error![]const u8 {
+    var done: std.ArrayList(u8) = .empty;
+    var not_done: std.ArrayList(u8) = .empty;
+    var at: []const u8 = "";
+    for (op.steps, 0..) |gi, step| {
+        const label = try stepLabel(arena, op.groups, gi, dests_shown, op.presentCount(op.groups[gi].uids));
+        if (step < op.completed) {
+            try done.print(arena, "{s}{s}", .{ if (done.items.len > 0) "; " else "", label });
+        } else if (step == op.completed) {
+            const g = op.groups[gi];
+            const total = op.presentCount(g.uids);
+            at = if ((g.kind == .move or g.kind == .delete) and op.current.pending > 0)
+                try partialMoveMessage(arena, op.current.done, total, op.current.pending, dests_shown[gi], source_shown, why)
+            else if (op.current.done > 0)
+                try arena.print("{s}: {d} of {d} were moved before the error: {s}", .{ label, op.current.done, total, why })
+            else
+                try arena.print("{s}: {s}", .{ label, why });
+        } else {
+            try not_done.print(arena, "{s}{s}", .{ if (not_done.items.len > 0) "; " else "", label });
+        }
+    }
+    if (op.completed >= op.steps.len) at = try arena.print("marking reviewed messages: {s}", .{why});
+    return arena.print("the plan stopped at {s}. Completed: {s}. Not attempted: {s}.", .{
+        at,
+        if (done.items.len > 0) done.items else "nothing",
+        if (not_done.items.len > 0) not_done.items else "nothing",
+    });
+}
+
+fn stepLabel(arena: Allocator, groups: []const triage.Group, gi: usize, dests_shown: []const []const u8, n: usize) Allocator.Error![]const u8 {
+    return switch (groups[gi].kind) {
+        .move => arena.print("move {d} to \"{s}\"", .{ n, dests_shown[gi] }),
+        .delete => arena.print("delete {d} (to \"{s}\")", .{ n, dests_shown[gi] }),
+        .flag => arena.print("flag {d}", .{n}),
+        .keep => arena.print("keep {d}", .{n}),
+    };
 }
 
 fn clearCache(ctx: *Ctx) Failure![]const u8 {
@@ -1205,13 +1550,8 @@ const TransferOp = struct {
     uidvalidity: u32 = 0,
     refused: ?[]const u8 = null,
     created: bool = false,
-    /// Messages moved/copied so far (a prefix of `matched`).
-    done: usize = 0,
-    /// Size of the batch the copy+expunge fallback copied but failed to
-    /// remove (0 otherwise).
-    pending: usize = 0,
-    pairs: std.ArrayList(organize.UidPair) = .empty,
-    map_complete: bool = true,
+    /// Messages moved/copied so far: a prefix of `matched`.
+    progress: Batches = .{},
 
     // Not retried: a resent COPY duplicates messages (ADR 0021).
     pub const retry_after_connection_loss = false;
@@ -1236,11 +1576,28 @@ const TransferOp = struct {
             self.created = true;
             _ = try bestEffort(s.subscribe(self.destination));
         }
-        for (0..organize.batchCount(self.matched.len)) |i| {
-            const b = organize.batch(self.matched, i);
-            const cu = try s.uidTransfer(self.arena, b, self.destination, self.move and strategy == .move);
-            if (self.move and strategy == .copy_expunge) {
-                s.uidStoreFlags(self.arena, b, true, &.{"\\Deleted"}) catch |err| {
+        try self.progress.run(self.arena, s, self.matched, self.destination, self.move, strategy);
+    }
+};
+
+/// Batched UID MOVE (or COPY + \Deleted + UID EXPUNGE under the fallback
+/// strategy), or UID COPY when `move` is false, of `uids` from the selected
+/// mailbox to `dest` (ADR 0021, spec §4.2). Records how far it got.
+const Batches = struct {
+    /// Messages moved/copied so far: a prefix of the UIDs passed to `run`.
+    done: usize = 0,
+    /// Size of the batch the copy+expunge fallback copied but failed to
+    /// remove (0 otherwise).
+    pending: usize = 0,
+    pairs: std.ArrayList(organize.UidPair) = .empty,
+    map_complete: bool = true,
+
+    fn run(self: *Batches, arena: Allocator, s: *Session, uids: []const u32, dest: [:0]const u8, move: bool, strategy: organize.MoveStrategy) accounts.Error!void {
+        for (0..organize.batchCount(uids.len)) |i| {
+            const b = organize.batch(uids, i);
+            const cu = try s.uidTransfer(arena, b, dest, move and strategy == .move);
+            if (move and strategy == .copy_expunge) {
+                s.uidStoreFlags(arena, b, true, &.{"\\Deleted"}) catch |err| {
                     self.pending = b.len;
                     return err;
                 };
@@ -1250,10 +1607,163 @@ const TransferOp = struct {
                 };
             }
             self.done += b.len;
-            if (try organize.uidMap(self.arena, cu)) |m| try self.pairs.appendSlice(self.arena, m) else self.map_complete = false;
+            if (try organize.uidMap(arena, cu)) |m| try self.pairs.appendSlice(arena, m) else self.map_complete = false;
         }
     }
 };
+
+/// organize_mailbox's IMAP work: the newest candidates, their headers (cached
+/// where possible), flags, and the first bytes of the allowed bodies.
+const GatherOp = struct {
+    arena: Allocator,
+    headers: CachedHeadersOp,
+    active: []const *const filter.Filter,
+    /// UID SEARCH arguments.
+    command: [:0]const u8,
+    limit: usize,
+
+    uidvalidity: u32 = 0,
+    /// Newest first, at most `limit`.
+    uids: []const u32 = &.{},
+    flags: []Fetched = &.{},
+    bodies: []Fetched = &.{},
+    withheld: std.AutoHashMapUnmanaged(u32, []const u8) = .empty,
+
+    pub fn run(self: *GatherOp, s: *Session) accounts.Error!void {
+        // A retry after reconnect starts from scratch.
+        self.withheld.clearRetainingCapacity();
+        self.uids = &.{};
+        self.flags = &.{};
+        self.bodies = &.{};
+        self.uidvalidity = try s.examine(self.headers.mailbox);
+        const found = try s.uidSearch(self.arena, self.command);
+        std.mem.sort(u32, found, {}, std.sort.desc(u32));
+        self.uids = found[0..@min(found.len, self.limit)];
+        if (self.uids.len == 0) return;
+        self.headers.uids = self.uids;
+        try self.headers.afterExamine(s, self.uidvalidity);
+        self.flags = try s.uidFetch(self.arena, self.uids, .{ .flags = true });
+        const allowed = try classifyForBodies(self.arena, self.active, self.uids, self.headers.result, &self.withheld);
+        if (allowed.len > 0) self.bodies = try s.uidFetch(self.arena, allowed, .{ .body = true, .partial = true });
+    }
+};
+
+/// apply_organization's IMAP work (spec §2.2): checks UIDVALIDITY, which UIDs
+/// exist and which are withheld; when executing, flags, moves, deletes (to
+/// Trash) and marks the reviewed messages, in that order.
+const ApplyOp = struct {
+    arena: Allocator,
+    /// `uids`: every UID in the plan.
+    headers: CachedHeadersOp,
+    active: []const *const filter.Filter,
+    expected_uidvalidity: u32,
+    execute: bool,
+    groups: []const triage.Group,
+    /// Per group: destination wire name (move), the Trash folder (delete), "".
+    dests: []const [:0]const u8,
+    /// Group indices in execution order (from `executionOrder`).
+    steps: []const usize,
+
+    uidvalidity: u32 = 0,
+    refused: ?[]const u8 = null,
+    present: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    withheld: std.AutoHashMapUnmanaged(u32, []const u8) = .empty,
+    /// Execution steps finished (an index into `order(groups)`).
+    completed: usize = 0,
+    /// Progress inside the step being executed.
+    current: Batches = .{},
+    /// Messages moved out of the folder (moves and deletes), for the cache.
+    moved: std.ArrayList(u32) = .empty,
+    /// Messages acted on per group (present ones).
+    counts: []usize = &.{},
+    keyword_refused: bool = false,
+
+    // Not retried: a resent MOVE or STORE after a partial run is ambiguous.
+    pub const retry_after_connection_loss = false;
+    pub const connection_lost_message = "connection lost while applying the plan; part of it may have been done. Run organize_mailbox again to see the current state.";
+
+    pub fn run(self: *ApplyOp, s: *Session) accounts.Error!void {
+        self.uidvalidity = if (self.execute) try s.select(self.headers.mailbox) else try s.examine(self.headers.mailbox);
+        if (self.uidvalidity != self.expected_uidvalidity) {
+            self.refused = "the folder changed since organize_mailbox (UIDVALIDITY differs); run organize_mailbox again";
+            return;
+        }
+        try self.headers.afterExamine(s, self.uidvalidity);
+        for (self.headers.result) |f| if (f.data != null) try self.present.put(self.arena, f.uid, {});
+        _ = try classifyForBodies(self.arena, self.active, self.headers.uids, self.headers.result, &self.withheld);
+        for (self.groups) |g| {
+            if (g.kind == .keep) continue;
+            for (g.uids) |u| if (self.withheld.get(u)) |name| {
+                self.refused = try self.arena.print("message {d} is withheld by filter \"{s}\"; only \"keep\" is allowed", .{ u, name });
+                return;
+            };
+        }
+        self.counts = try self.arena.alloc(usize, self.groups.len);
+        for (self.groups, self.counts) |g, *n| n.* = self.presentCount(g.uids);
+        if (!self.execute) return;
+
+        var strategy: organize.MoveStrategy = .move;
+        for (self.groups) |g| if (g.kind == .move or g.kind == .delete) {
+            strategy = organize.moveStrategy(try s.capabilities());
+            break;
+        };
+        if (strategy == .unsupported) {
+            self.refused = unsupported_move;
+            return;
+        }
+        for (self.steps) |gi| {
+            const g = self.groups[gi];
+            const ids = try self.presentUids(g.uids);
+            self.current = .{};
+            switch (g.kind) {
+                .flag => for (0..organize.batchCount(ids.len)) |i| {
+                    try s.uidStoreFlags(self.arena, organize.batch(ids, i), true, &.{"\\Flagged"});
+                },
+                .move, .delete => {
+                    try self.current.run(self.arena, s, ids, self.dests[gi], true, strategy);
+                    try self.moved.appendSlice(self.arena, ids);
+                },
+                .keep => {},
+            }
+            self.completed += 1;
+        }
+        var reviewed: std.ArrayList(u32) = .empty;
+        for (self.groups) |g| if (g.kind == .flag or g.kind == .keep) try reviewed.appendSlice(self.arena, try self.presentUids(g.uids));
+        for (0..organize.batchCount(reviewed.items.len)) |i| {
+            s.uidStoreFlags(self.arena, organize.batch(reviewed.items, i), true, &.{triage.reviewed_keyword}) catch |err| switch (err) {
+                error.ServerRejected => {
+                    self.keyword_refused = true;
+                    break;
+                },
+                else => return err,
+            };
+        }
+    }
+
+    fn presentCount(self: *const ApplyOp, uids: []const u32) usize {
+        var n: usize = 0;
+        for (uids) |u| {
+            if (self.present.contains(u)) n += 1;
+        }
+        return n;
+    }
+
+    fn presentUids(self: *const ApplyOp, uids: []const u32) Allocator.Error![]const u32 {
+        var out: std.ArrayList(u32) = .empty;
+        for (uids) |u| if (self.present.contains(u)) try out.append(self.arena, u);
+        return out.items;
+    }
+};
+
+/// Group indices in execution order (spec §2.2): flag first, then the moves,
+/// then delete, keep last.
+fn executionOrder(arena: Allocator, groups: []const triage.Group) Allocator.Error![]const usize {
+    var out: std.ArrayList(usize) = .empty;
+    for ([_]triage.Kind{ .flag, .move, .delete, .keep }) |k| {
+        for (groups, 0..) |g, i| if (g.kind == k) try out.append(arena, i);
+    }
+    return out.items;
+}
 
 /// The given UIDs that exist in the selected mailbox, in input order without
 /// duplicates (so counts and UID maps describe real messages).
@@ -1782,4 +2292,100 @@ test "review: new folder names with invisible characters never reach the server"
     try testing.expectEqualStrings(msg, (try callJson(&reg, a, "create_mailbox", "{\"account\":\"rw\",\"name\":\"INBOX\\u200b\"}")).?.invalid_params);
     try testing.expectEqualStrings(msg, (try callJson(&reg, a, "create_mailbox", "{\"account\":\"rw\",\"name\":\"C1\\u0085\"}")).?.invalid_params);
     try testing.expectEqualStrings(msg, (try callJson(&reg, a, "rename_mailbox", "{\"account\":\"rw\",\"name\":\"X\",\"new_name\":\"Y\\u202e\"}")).?.invalid_params);
+}
+
+test "organize tools: argument errors never reach the server" {
+    var accts = testAccounts();
+    var reg = try testRegistry(&accts);
+    defer reg.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try testing.expectEqualStrings("argument \"limit\" must be between 1 and 200", (try callJson(&reg, a, "organize_mailbox", "{\"account\":\"rw\",\"limit\":0}")).?.invalid_params);
+    try testing.expectEqualStrings("argument \"limit\" must be between 1 and 200", (try callJson(&reg, a, "organize_mailbox", "{\"account\":\"rw\",\"limit\":201}")).?.invalid_params);
+    try testing.expectEqualStrings("argument \"limit\" must be an integer", (try callJson(&reg, a, "organize_mailbox", "{\"account\":\"rw\",\"limit\":\"5\"}")).?.invalid_params);
+    try testing.expectEqualStrings("criteria must not contain CR, LF, or NUL", (try callJson(&reg, a, "organize_mailbox", "{\"account\":\"rw\",\"criteria\":\"ALL\\r\\nA1 DELETE INBOX\"}")).?.invalid_params);
+
+    const apply = "{\"account\":\"rw\",\"directory\":\"INBOX\",\"uidvalidity\":7";
+    try testing.expectEqualStrings("missing required argument \"uidvalidity\"", (try callJson(&reg, a, "apply_organization", "{\"account\":\"rw\",\"directory\":\"INBOX\",\"actions\":[]}")).?.invalid_params);
+    try testing.expectEqualStrings("actions must not be empty", (try callJson(&reg, a, "apply_organization", apply ++ ",\"actions\":[]}")).?.invalid_params);
+    try testing.expectEqualStrings(
+        "execute=true needs the plan_hash from a dry run (execute=false)",
+        (try callJson(&reg, a, "apply_organization", apply ++ ",\"actions\":[{\"uid\":\"1\",\"action\":\"keep\"}],\"execute\":true}")).?.invalid_params,
+    );
+}
+
+test "organize tools: read-only accounts gather and dry-run but never execute" {
+    var accts = testAccounts();
+    var reg = try testRegistry(&accts);
+    defer reg.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const unreachable_ro = "account \"ro\": cannot connect to 127.0.0.1:1";
+    try testing.expectEqualStrings(unreachable_ro, (try callJson(&reg, a, "organize_mailbox", "{\"account\":\"ro\"}")).?.tool_error);
+    const apply = "{\"account\":\"ro\",\"directory\":\"INBOX\",\"uidvalidity\":7,\"actions\":[{\"uid\":\"1\",\"action\":\"flag\"}]";
+    try testing.expectEqualStrings(unreachable_ro, (try callJson(&reg, a, "apply_organization", apply ++ "}")).?.tool_error);
+    try testing.expectEqualStrings("account \"ro\" is read-only", (try callJson(&reg, a, "apply_organization", apply ++ ",\"execute\":true,\"plan_hash\":\"0123456789abcdef\"}")).?.tool_error);
+}
+
+test "apply_organization runs flag, then moves, then delete, then keep" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const groups = [_]triage.Group{
+        .{ .kind = .move, .destination = "A", .uids = &.{1} },
+        .{ .kind = .move, .destination = "B", .uids = &.{2} },
+        .{ .kind = .delete, .uids = &.{3} },
+        .{ .kind = .flag, .uids = &.{4} },
+        .{ .kind = .keep, .uids = &.{5} },
+    };
+    try testing.expectEqualSlices(usize, &.{ 3, 0, 1, 2, 4 }, try executionOrder(a, &groups));
+}
+
+test "applyFailureMessage says what was done, where it stopped, and what was not attempted" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const groups = [_]triage.Group{
+        .{ .kind = .move, .destination = "Receipts", .uids = &.{ 1, 2, 3 } },
+        .{ .kind = .delete, .uids = &.{4} },
+        .{ .kind = .flag, .uids = &.{5} },
+    };
+    var op: ApplyOp = .{
+        .arena = a,
+        .headers = undefined,
+        .active = &.{},
+        .expected_uidvalidity = 7,
+        .execute = true,
+        .groups = &groups,
+        .dests = &.{ "Receipts", "Trash", "" },
+        .steps = try executionOrder(a, &groups),
+    };
+    for ([_]u32{ 1, 2, 3, 4, 5 }) |u| try op.present.put(a, u, {});
+    op.completed = 1; // flag done; stopped in the move
+    op.current = .{ .done = 1, .pending = 0 };
+    const dests_shown = [_][]const u8{ "Receipts", "Trash", "" };
+    try testing.expectEqualStrings(
+        "the plan stopped at move 3 to \"Receipts\": 1 of 3 were moved before the error: boom. Completed: flag 1. Not attempted: delete 1 (to \"Trash\").",
+        try applyFailureMessage(a, &op, &dests_shown, "INBOX", "boom"),
+    );
+    op.current = .{ .done = 0, .pending = 2 };
+    try testing.expect(std.mem.find(u8, try applyFailureMessage(a, &op, &dests_shown, "INBOX", "boom"), "were copied to \"Receipts\" but not removed from \"INBOX\"") != null);
+    op.completed = 3;
+    try testing.expectEqualStrings(
+        "the plan stopped at marking reviewed messages: boom. Completed: flag 1; move 3 to \"Receipts\"; delete 1 (to \"Trash\"). Not attempted: nothing.",
+        try applyFailureMessage(a, &op, &dests_shown, "INBOX", "boom"),
+    );
+}
+
+test "apply_organization is never retried (gathering may be); its schema lists the actions" {
+    try testing.expect(accounts.retriesAfterConnectionLoss(GatherOp));
+    try testing.expect(!accounts.retriesAfterConnectionLoss(ApplyOp));
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var jw: Stringify = .{ .writer = &aw.writer };
+    try writeList(&jw);
+    try testing.expect(std.mem.find(u8, aw.written(), "\"enum\":[\"move\",\"delete\",\"flag\",\"keep\"]") != null);
+    try testing.expect(std.mem.find(u8, aw.written(), "\"limit\":{\"type\":\"integer\"") != null);
 }
