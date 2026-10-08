@@ -26,6 +26,9 @@ Throughout, the account is called `gmail` (env prefix `IMAP_GMAIL_`) and the
    whose mail you want to read (or any account you administer).
 2. Project picker → **New project** → name it e.g. `tp-imap-mcp` → **Create**.
 3. Make sure the new project is selected in the picker.
+4. **APIs & Services → Library** → search **Gmail API** → **Enable**. tp-imap-mcp
+   only uses IMAP (it never calls the Gmail REST API), but the scope picker in
+   step 2.4 lists `https://mail.google.com/` only for enabled APIs.
 
 ## 2. Configure the OAuth consent screen
 
@@ -41,7 +44,9 @@ OAuth consent screen*).
    test users can authorize a Testing app.
 4. **Data access:** **Add or remove scopes** → add
    `https://mail.google.com/` (listed as a *restricted* scope: "Read, compose,
-   send, and permanently delete all your email from Gmail"). Save.
+   send, and permanently delete all your email from Gmail"). If it is not in
+   the list, the Gmail API is not enabled (step 1.4) — or paste the scope into
+   **Manually add scopes** at the bottom of the dialog. Save.
 
 ## 3. Create the OAuth client
 
@@ -50,9 +55,14 @@ Google Auth Platform → **Clients** → **Create client**:
 - **Application type:** **Desktop app** (required: Desktop clients accept the
   `http://127.0.0.1:<port>/` loopback redirect tp-imap-mcp uses, with no
   redirect URI to register).
+  Newer consoles may first ask whether the client is for an **AI agent / MCP
+  client**; answering yes creates a Desktop client directly, without asking
+  for a redirect URI. Either way, the downloaded JSON must have a top-level
+  `"installed"` key (a `"web"` key means the wrong type).
 - **Name:** `tp-imap-mcp`.
 - **Create**, then copy the **Client ID** and **Client secret** (or download
-  the JSON).
+  the JSON and take `installed.client_id` and `installed.client_secret`; then
+  delete the file, since the secret lives in 1Password).
 
 > For a Desktop app the client secret is not truly secret (Google says so), but
 > keep it in 1Password anyway.
@@ -167,14 +177,14 @@ access**. The stored refresh token stops working immediately; delete it from
 
 ## Troubleshooting
 
-| Symptom | Fix |
-|---|---|
-| `Error 400: redirect_uri_mismatch` | The OAuth client is not of type **Desktop app**. Create a Desktop client (step 3) and update the client ID/secret. |
-| `Error 403: access_denied` / "has not completed the Google verification process" | Your address is not a **test user** (step 2.3), or a Workspace admin blocks the app. |
-| `IMAP_GMAIL_OAUTH_CLIENT_SECRET is missing or empty` | Google requires the client secret; check the 1Password reference. |
-| `op run` fails: `item 'Private/Gmail OAuth' does not have a field 'refresh token'` | You enabled the refresh-token line before step 6; comment it out, run `auth`, store the token, re-enable. |
-| `The provider returned no refresh token` | Google issues one only on fresh consent: remove access at myaccount.google.com/permissions and run `auth` again. |
-| `the OAuth refresh token was rejected (expired or revoked)` | 7-day Testing expiry, password change, or revoked access: repeat step 6. |
-| `OAuth login failed: … Invalid credentials` | The token lacks the `https://mail.google.com/` scope (step 2.4), IMAP is disabled, or `IMAP_GMAIL_LOGIN` is not the authorized address. |
-| `Timed out waiting for the authorization redirect` | Complete the consent within 5 minutes; if the browser shows "connection refused", make sure nothing blocks `127.0.0.1`. |
-| `error initializing client: authorization timeout` (from `op`) | Approve the 1Password prompt (Touch ID) in time, or unlock 1Password first. |
+| Symptom                                                                            | Fix                                                                                                                                     |
+|------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| `Error 400: redirect_uri_mismatch`                                                 | The OAuth client is not of type **Desktop app**. Create a Desktop client (step 3) and update the client ID/secret.                      |
+| `Error 403: access_denied` / "has not completed the Google verification process"   | Your address is not a **test user** (step 2.3), or a Workspace admin blocks the app.                                                    |
+| `IMAP_GMAIL_OAUTH_CLIENT_SECRET is missing or empty`                               | Google requires the client secret; check the 1Password reference.                                                                       |
+| `op run` fails: `item 'Private/Gmail OAuth' does not have a field 'refresh token'` | You enabled the refresh-token line before step 6; comment it out, run `auth`, store the token, re-enable.                               |
+| `The provider returned no refresh token`                                           | Google issues one only on fresh consent: remove access at myaccount.google.com/permissions and run `auth` again.                        |
+| `the OAuth refresh token was rejected (expired or revoked)`                        | 7-day Testing expiry, password change, or revoked access: repeat step 6.                                                                |
+| `OAuth login failed: … Invalid credentials`                                        | The token lacks the `https://mail.google.com/` scope (step 2.4), IMAP is disabled, or `IMAP_GMAIL_LOGIN` is not the authorized address. |
+| `Timed out waiting for the authorization redirect`                                 | Complete the consent within 5 minutes; if the browser shows "connection refused", make sure nothing blocks `127.0.0.1`.                 |
+| `error initializing client: authorization timeout` (from `op`)                     | Approve the 1Password prompt (Touch ID) in time, or unlock 1Password first.                                                             |

@@ -93,6 +93,10 @@ op read "op://Private/Work IMAP/username"
 cp imap.env.example imap.env
 ```
 
+The example defines three accounts: a plain IMAP server, Gmail with an app
+password and a Google account with XOAUTH2. Keep only the blocks you use, and
+list exactly those names in `IMAP_ACCOUNTS`. A minimal file looks like this:
+
 ```bash
 IMAP_ACCOUNTS=work,personal
 
@@ -108,7 +112,7 @@ IMAP_PERSONAL_READONLY=1
 
 - One `IMAP_<NAME>_*` block per name in `IMAP_ACCOUNTS`; `<NAME>` is upper-cased.
 - Spaces inside `op://` references are fine in an env file — don't quote them.
-- Gmail / Outlook need an **app password** (OAuth is not supported).
+- Gmail / Outlook: use an **app password**, or OAuth 2.0 (XOAUTH2) where app passwords are disabled — see [OAuth accounts](#oauth-accounts) and the [Gmail XOAUTH2 runbook](docs/runbooks/gmail-xoauth2.md).
 - See [Configuration](#-configuration) for every variable.
 
 ### 5. Check the configuration
@@ -310,6 +314,35 @@ Microsoft 365 / Outlook.com (where IMAP passwords are usually disabled) and Gmai
 1. Register an OAuth app with the provider — step by step for Gmail: [docs/runbooks/gmail-xoauth2.md](docs/runbooks/gmail-xoauth2.md). Microsoft: an Entra ID app ("Mobile and desktop applications", redirect `http://127.0.0.1`, permissions `IMAP.AccessAsUser.All` + `offline_access`).
 2. Put `IMAP_<NAME>_AUTH=oauth2`, the provider, and the client ID/secret (as `op://` references) in `imap.env`.
 3. Run `op run --env-file imap.env -- tp_imap_mcp auth <account>`: your browser opens, you consent, and the refresh token is printed once. Store it in 1Password and reference it as `IMAP_<NAME>_OAUTH_REFRESH_TOKEN`.
+
+> [!NOTE]
+> Each OAuth account needs its own refresh token, and so its own `auth` run. In the browser, choose the account that matches `IMAP_<NAME>_LOGIN`. Several accounts may share one OAuth client. While an account has no refresh token, `op run` fails on its reference and the server refuses to start, so keep the line commented out until step 3. Never set `IMAP_<NAME>_PASSWORD` on an OAuth account.
+
+A Google Workspace account next to a personal Gmail account that uses an app password:
+
+```bash
+IMAP_ACCOUNTS=work,gmail
+
+IMAP_WORK_HOST=imap.gmail.com
+IMAP_WORK_LOGIN=you@work.example
+IMAP_WORK_AUTH=oauth2
+IMAP_WORK_OAUTH_PROVIDER=google
+IMAP_WORK_OAUTH_CLIENT_ID=op://Work/Gmail OAuth/client id
+IMAP_WORK_OAUTH_CLIENT_SECRET=op://Work/Gmail OAuth/client secret
+IMAP_WORK_OAUTH_REFRESH_TOKEN=op://Work/Gmail OAuth/refresh token
+IMAP_WORK_DRAFTS=[Gmail]/Drafts
+
+IMAP_GMAIL_HOST=imap.gmail.com
+IMAP_GMAIL_LOGIN=you@gmail.com
+IMAP_GMAIL_PASSWORD=op://Private/Gmail App Password/password
+IMAP_GMAIL_DRAFTS=[Gmail]/Drafts
+```
+
+```bash
+op run --env-file imap.env -- tp_imap_mcp auth work   # once, then whenever the token expires
+```
+
+For Microsoft 365, set `IMAP_<NAME>_HOST=outlook.office365.com`, `IMAP_<NAME>_OAUTH_PROVIDER=microsoft` and, optionally, `IMAP_<NAME>_OAUTH_TENANT` (default `common`). The client secret is optional for Microsoft.
 
 Access tokens are refreshed automatically and kept only in memory. When a refresh token expires (Microsoft ~90 days; Google apps in *Testing* 7 days), tools report it and tell you to run `auth` again.
 
