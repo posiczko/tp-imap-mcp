@@ -46,6 +46,10 @@ pub const What = packed struct {
     body: bool = false,
     size: bool = false,
     flags: bool = false,
+    /// With `body`: only the first `partial_bytes` (BODY.PEEK[]<0.N>).
+    partial: bool = false,
+
+    pub const partial_bytes = c.PARTIAL_BYTES;
 
     fn bits(w: What) c_int {
         var b: c_int = 0;
@@ -53,6 +57,7 @@ pub const What = packed struct {
         if (w.body) b |= c.FETCH_BODY;
         if (w.size) b |= c.FETCH_SIZE;
         if (w.flags) b |= c.FETCH_FLAGS;
+        if (w.partial) b |= c.FETCH_PARTIAL;
         return b;
     }
 };
@@ -370,4 +375,10 @@ test "todo: a decode that comes out empty falls back to the raw value" {
     defer arena_state.deinit();
     const raw = "=?UTF-8?B?AFJlc2V0IHlvdXIgcGFzc3dvcmQ=?=";
     try testing.expectEqualStrings(raw, try decodeHeaderValue(arena_state.allocator(), raw));
+}
+
+test "What.bits sets FETCH_PARTIAL for a partial body fetch" {
+    try testing.expectEqual(c.FETCH_BODY | c.FETCH_PARTIAL, (What{ .body = true, .partial = true }).bits());
+    try testing.expectEqual(c.FETCH_BODY, (What{ .body = true }).bits());
+    try testing.expectEqual(16384, What.partial_bytes);
 }

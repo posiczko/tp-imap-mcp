@@ -13,6 +13,8 @@ pub const FETCH_HEADER: c_int = 1;
 pub const FETCH_BODY: c_int = 2;
 pub const FETCH_SIZE: c_int = 4;
 pub const FETCH_FLAGS: c_int = 8;
+pub const FETCH_PARTIAL: c_int = 16;
+pub const PARTIAL_BYTES = 16384;
 
 pub const Session = opaque {};
 

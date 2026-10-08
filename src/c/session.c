@@ -349,7 +349,10 @@ static struct mailimap_fetch_type *fetch_type(int what) {
         (what & TPI_FETCH_BODY) ? mailimap_section_new(NULL) : mailimap_section_new_header();
     if (sec == NULL)
       goto fail;
-    struct mailimap_fetch_att *att = mailimap_fetch_att_new_body_peek_section(sec);
+    struct mailimap_fetch_att *att =
+        (what & TPI_FETCH_BODY) && (what & TPI_FETCH_PARTIAL)
+            ? mailimap_fetch_att_new_body_peek_section_partial(sec, 0, TPI_PARTIAL_BYTES)
+            : mailimap_fetch_att_new_body_peek_section(sec);
     if (att == NULL) {
       mailimap_section_free(sec);
       goto fail;

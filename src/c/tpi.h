@@ -75,7 +75,10 @@ enum {
   TPI_FETCH_BODY = 2,   /* BODY.PEEK[]       */
   TPI_FETCH_SIZE = 4,   /* RFC822.SIZE       */
   TPI_FETCH_FLAGS = 8,  /* FLAGS             */
+  TPI_FETCH_PARTIAL = 16, /* with TPI_FETCH_BODY: only the first TPI_PARTIAL_BYTES */
 };
+
+enum { TPI_PARTIAL_BYTES = 16384 }; /* BODY.PEEK[]<0.16384> */
 
 typedef struct {
   uint32_t uid;
