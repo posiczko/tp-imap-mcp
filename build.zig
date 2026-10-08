@@ -25,12 +25,14 @@ pub fn build(b: *std.Build) void {
     run_itest.addPassthruArgs();
     b.step("itest", "Run live integration checks (needs IMAP_* env)").dependOn(&run_itest.step);
 
-    // Removes zig-out/. The local cache (.zig-cache) is in use by this very
-    // build, so it is not removed here: `rm -rf .zig-cache` by hand.
-    const rm_out = b.addSystemCommand(&.{ "rm", "-rf" });
-    rm_out.addDirectoryArg(b.path("zig-out"));
-    rm_out.has_side_effects = true;
-    b.step("clean", "Remove zig-out (the built server binary)").dependOn(&rm_out.step);
+    // Removes the build output and the local cache. The running build lives
+    // in .zig-cache, so this is the only step that runs: nothing else
+    // depends on the cache afterwards.
+    const rm = b.addSystemCommand(&.{ "rm", "-rf" });
+    rm.addDirectoryArg(b.path("zig-out"));
+    rm.addDirectoryArg(b.path(".zig-cache"));
+    rm.has_side_effects = true;
+    b.step("clean", "Remove zig-out (the built server binary) and .zig-cache").dependOn(&rm.step);
 }
 
 /// A module that can call libetpan through the C shim in src/c.
