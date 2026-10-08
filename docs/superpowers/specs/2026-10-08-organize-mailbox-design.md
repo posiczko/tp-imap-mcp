@@ -99,6 +99,7 @@ Validation (every call, before any change):
   (existing `organize` rules).
 - `delete`: the account has a `\Trash` folder, and the source is not it.
 - UIDs that no longer exist are not an error: listed under `missing` and skipped.
+- Withheld messages (active sensitive-content filters) accept only `keep` (§5.1).
 
 Dry run (`execute=false`, also on read-only accounts) returns the plan grouped
 by outcome, with subjects shown as in `organize_mailbox`:
@@ -153,8 +154,8 @@ messages remain if the user wants. In Claude Code:
   is never a source; protected folders are unaffected (no folder is renamed,
   created or deleted).
 - Read-only accounts can gather and dry-run, never execute.
-- Withheld messages contribute no content to the model; they can still be
-  classified by sender and date.
+- Withheld messages contribute no content to the model and are never moved,
+  deleted or flagged: the server accepts only `keep` for them (§5.1).
 - The instructions file is user-controlled configuration (like `filters.zon`);
   message content reaches the model only sanitized.
 
@@ -173,20 +174,80 @@ messages remain if the user wants. In Claude Code:
 - `src/prompts.zig`: `organize_my_mailbox` with optional arguments.
 - `src/descriptions.zig`, README, ADR 0022, `docs/TODO.md`.
 
-## 5. Built-in instructions (summary; exact text in `src/organize_prompt.md`)
+## 5. Built-in instructions (exact text of `src/organize_prompt.md`)
 
-Be conservative. Move a message only when its sender or subject clearly matches
-an existing folder's purpose. Delete only obvious spam, phishing-like bulk mail
-or expired promotions. Flag direct requests from people, deadlines, invoices or
-money owed, and account or security notices. When unsure, keep. Never invent
-folder names; if a new folder would help, say so to the user instead of
-including it in the plan.
+```markdown
+# How to organize this mailbox
+
+You are proposing a plan; the user reviews it before anything changes. Be
+conservative: a message left in place costs nothing, a message filed or deleted
+by mistake can be missed. When unsure, choose **keep**.
+
+## Never touch (always **keep**)
+
+- Messages shown as `withheld`. They were hidden by a sensitive-content filter
+  (password resets, one-time codes, sign-in links). Do not guess what they are.
+- Anything about credentials or account access, even if it was not withheld:
+  password or PIN changes, verification or confirmation codes, magic or sign-in
+  links, two-factor setup, recovery codes, API keys or tokens, new-device or
+  new-login alerts, "confirm it's you" requests.
+- Drafts, and messages the user sent themselves.
+- Anything that looks like it is in the middle of a conversation the user is
+  part of, unless it clearly belongs in a folder for that topic.
+
+## Flag (needs attention)
+
+Flag a message, and keep it where it is, when it:
+- asks the user, personally, to do or answer something;
+- mentions a deadline, appointment or expiry in the next two weeks;
+- is an invoice, bill, payment request, failed payment, or money owed;
+- comes from a person (not a mailing list or a no-reply address) and is not
+  plainly social chatter;
+- is a security or fraud notice about one of the user's accounts that is not
+  about credentials (those are **keep**, see above).
+
+## Move to a folder
+
+Move a message only to a folder from the `folders` list, and only when the
+sender or subject clearly matches that folder's purpose (for example receipts
+and order confirmations to a receipts folder, newsletters to a newsletters
+folder, notifications from a service to that service's folder). Never invent a
+folder name. If several messages would fit a folder that does not exist, keep
+them and tell the user which new folder you would suggest.
+
+Do not move a message you also flag.
+
+## Delete (move to Trash)
+
+Delete only when it is plainly worthless:
+- obvious spam or bulk mail the user never signed up for;
+- promotions and sales whose offer has expired;
+- automated notifications that are superseded (e.g. a shipping update after a
+  later "delivered" message for the same order).
+Never delete messages from people, receipts, invoices, anything legal, medical,
+financial or tax related, or anything you are not sure about.
+
+## Output
+
+Give exactly one action per message: `keep`, `flag`, `move` (with
+`destination`), or `delete`. When presenting the dry run, summarize per group
+and mention anything you deliberately left alone and why.
+```
+
+### 5.1 Server-enforced rule for withheld messages
+
+`apply_organization` re-classifies the plan's messages with the account's
+active sensitive-content filters (from their headers, as `organize_mailbox`
+did) and refuses any action other than `keep` for a withheld message:
+`message 4712 is withheld by filter "password_reset"; only "keep" is allowed`.
+The rule holds even if a custom `organize.md` says otherwise.
 
 ## 6. Testing
 
 Unit (no server):
 - instruction resolution order and the 16 KiB cap (temporary config dir);
 - every validation rule; missing UIDs reported, not fatal;
+- a withheld message with `move`/`delete`/`flag` is refused, `keep` accepted;
 - `planHash` is independent of action order and changes with any action;
 - grouping output; execute without / with a wrong `plan_hash` refused;
   read-only: dry run allowed, execute refused;
