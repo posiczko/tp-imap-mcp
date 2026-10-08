@@ -4,6 +4,7 @@ const std = @import("std");
 const config = @import("config.zig");
 const filter_load = @import("filter/load.zig");
 const mcp = @import("mcp.zig");
+const oauth_flow = @import("oauth/flow.zig");
 const Registry = @import("accounts.zig").Registry;
 
 pub fn main(init: std.process.Init) !u8 {
@@ -12,6 +13,8 @@ pub fn main(init: std.process.Init) !u8 {
     const stderr = &stderr_writer.interface;
 
     const arena = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(arena);
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "auth")) return authCommand(init, arena, args, stderr);
     try stderr.writeAll(mcp.server_name ++ ": ");
     const accounts, const settings, const active_filters = blk: {
         const accounts = config.load(arena, init.environ_map, stderr) catch |err| break :blk err;
@@ -45,7 +48,7 @@ pub fn main(init: std.process.Init) !u8 {
     try stderr.writeAll("\n");
     try stderr.flush();
 
-    var registry: Registry = try .init(init.gpa, accounts, settings, active_filters);
+    var registry: Registry = try .init(init.gpa, init.io, accounts, settings, active_filters);
     defer registry.deinit();
 
     var in_buf: [64 * 1024]u8 = undefined;
@@ -55,6 +58,40 @@ pub fn main(init: std.process.Init) !u8 {
 
     try mcp.serve(init.gpa, &registry, &stdin_reader.interface, &stdout_writer.interface);
     return 0;
+}
+
+/// `tp_imap_mcp auth <account>` (ADR 0020).
+fn authCommand(init: std.process.Init, arena: std.mem.Allocator, args: []const [:0]const u8, stderr: *std.Io.Writer) !u8 {
+    if (args.len != 3) {
+        try stderr.writeAll("usage: op run --env-file imap.env -- tp_imap_mcp auth <account>\n");
+        try stderr.flush();
+        return 2;
+    }
+    const name = args[2];
+    try stderr.writeAll(mcp.server_name ++ ": ");
+    const accounts, const settings = blk: {
+        const accounts = config.loadWith(arena, init.environ_map, stderr, .{ .auth_account = name }) catch |err| break :blk err;
+        const settings = config.loadSettings(arena, init.environ_map, stderr) catch |err| break :blk err;
+        break :blk .{ accounts, settings };
+    } catch |err| switch (err) {
+        error.InvalidConfig => {
+            try stderr.writeAll("\n");
+            try stderr.flush();
+            return 1;
+        },
+        error.OutOfMemory => return err,
+    };
+    const account = config.find(accounts, name) orelse {
+        try stderr.print("unknown account \"{s}\"\n", .{name});
+        try stderr.flush();
+        return 1;
+    };
+    try stderr.writeAll("\n");
+    var out_buf: [1024]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(init.io, &out_buf);
+    const code = try oauth_flow.run(init.gpa, init.io, account, settings, &stdout_writer.interface, stderr);
+    try stderr.flush();
+    return code;
 }
 
 test {
@@ -77,6 +114,10 @@ test {
     _ = @import("filter/rules.zig");
     _ = @import("filter/load.zig");
     _ = @import("attachments.zig");
+    _ = @import("oauth/pkce.zig");
+    _ = @import("oauth/provider.zig");
+    _ = @import("oauth/token.zig");
+    _ = @import("oauth/flow.zig");
     _ = @import("sanitize/unicode.zig");
     _ = @import("sanitize/entities.zig");
     _ = @import("sanitize/limit.zig");

@@ -237,7 +237,14 @@ All configuration is environment variables (usually via `op run --env-file imap.
 | `IMAP_ACCOUNTS` | yes | Comma-separated account names, e.g. `work,personal` (`[A-Za-z0-9_]+`) |
 | `IMAP_<NAME>_HOST` | yes | IMAP server host name |
 | `IMAP_<NAME>_LOGIN` | yes | Login (may be `op://…`) |
-| `IMAP_<NAME>_PASSWORD` | yes | Password (should be `op://…`) |
+| `IMAP_<NAME>_PASSWORD` | password auth | Password (should be `op://…`); must not be set with `AUTH=oauth2` |
+| `IMAP_<NAME>_AUTH` | no | `password` (default) or `oauth2` — see [OAuth accounts](#oauth-accounts) |
+| `IMAP_<NAME>_OAUTH_PROVIDER` | oauth2 | `google`, `microsoft`, or `custom` |
+| `IMAP_<NAME>_OAUTH_CLIENT_ID` | oauth2 | OAuth client ID |
+| `IMAP_<NAME>_OAUTH_CLIENT_SECRET` | google | OAuth client secret (optional for Microsoft) |
+| `IMAP_<NAME>_OAUTH_REFRESH_TOKEN` | oauth2 | From `tp_imap_mcp auth <account>` (store in 1Password) |
+| `IMAP_<NAME>_OAUTH_TENANT` | no | Microsoft tenant (default `common`) |
+| `IMAP_<NAME>_OAUTH_AUTH_URL`, `_TOKEN_URL`, `_SCOPE` | custom | Endpoints (https) and scopes for a custom provider |
 | `IMAP_<NAME>_PORT` | no | Default `993` (implicit TLS) |
 | `IMAP_<NAME>_READONLY` | no | `1`/`true`/`yes` makes the account read-only |
 | `IMAP_<NAME>_DRAFTS` | no | Drafts folder; default is the server's `\Drafts` folder, else `Drafts` |
@@ -296,6 +303,16 @@ IMAP_WORK_PASSWORD=op://Private/Work IMAP/password
 
 </details>
 
+### OAuth accounts
+
+Microsoft 365 / Outlook.com (where IMAP passwords are usually disabled) and Gmail can use OAuth 2.0 (XOAUTH2) instead of a password:
+
+1. Register an OAuth app with the provider — step by step for Gmail: [docs/runbooks/gmail-xoauth2.md](docs/runbooks/gmail-xoauth2.md). Microsoft: an Entra ID app ("Mobile and desktop applications", redirect `http://127.0.0.1`, permissions `IMAP.AccessAsUser.All` + `offline_access`).
+2. Put `IMAP_<NAME>_AUTH=oauth2`, the provider, and the client ID/secret (as `op://` references) in `imap.env`.
+3. Run `op run --env-file imap.env -- tp_imap_mcp auth <account>`: your browser opens, you consent, and the refresh token is printed once. Store it in 1Password and reference it as `IMAP_<NAME>_OAUTH_REFRESH_TOKEN`.
+
+Access tokens are refreshed automatically and kept only in memory. When a refresh token expires (Microsoft ~90 days; Google apps in *Testing* 7 days), tools report it and tell you to run `auth` again.
+
 ## 🧰 Tools
 
 Every tool except `list_accounts` takes an `account` argument.
@@ -349,7 +366,8 @@ What the model sees, after filtering and sanitizing:
 | `CA bundle … is not readable` | `brew install ca-certificates`, or point `TP_IMAP_MCP_CA_FILE` at a PEM bundle. |
 | `TLS handshake … failed; the certificate is not trusted` | The server's certificate doesn't chain to your CA bundle (self-signed or private CA): add that CA to a bundle and set `TP_IMAP_MCP_CA_FILE`. |
 | `the TLS certificate … is not valid for host …` | `IMAP_<NAME>_HOST` doesn't match a name in the certificate — use the host name the certificate is issued for. |
-| `login failed: …` | Wrong credentials, or the provider requires an app password. |
+| `login failed: …` | Wrong credentials, or the provider requires an app password (or OAuth). |
+| `the OAuth refresh token was rejected (expired or revoked)` | Run `op run --env-file imap.env -- tp_imap_mcp auth <account>` and store the new token. |
 | `cannot connect to host:port` | Host/port wrong, or port 993 blocked. Only implicit TLS (993-style) is supported, not STARTTLS. |
 | A negated search (`NOT FROM "x"`) returns nothing | Some servers (seen on Dovecot) mishandle `NOT` on header keys; search the positive form instead. |
 | A folder created elsewhere doesn't show up | The mailbox list is cached for an hour; ask for a refresh. |
@@ -387,7 +405,8 @@ src/
 ├── itest.zig           live integration checks
 └── testdata/           MIME fixtures
 docs/
-├── adr/                architecture decision records (0001–0019)
+├── adr/                architecture decision records (0001–0020)
+├── runbooks/           step-by-step operational guides (e.g. Gmail XOAUTH2)
 └── superpowers/        design specs and implementation plans
 ```
 
@@ -417,6 +436,7 @@ CI (`.github/workflows/ci.yml`) runs the unit tests, an optimized build, and a s
 - [x] Sensitive-content filters — [spec](docs/superpowers/specs/2026-10-07-sensitive-content-filters-design.md) · [ADR 0017](docs/adr/0017-sensitive-content-filters.md)
 - [x] Output sanitization — [spec](docs/superpowers/specs/2026-10-07-output-sanitization-design.md) · [ADR 0018](docs/adr/0018-sanitize-model-bound-output.md) · [ADR 0019](docs/adr/0019-decoded-sanitized-header-values.md)
 - [x] Attachment listing (`list_attachments`, metadata only)
+- [x] **OAuth (XOAUTH2)** for Microsoft 365 / Outlook.com and Gmail — [spec](docs/superpowers/specs/2026-10-07-oauth2-design.md) · [ADR 0020](docs/adr/0020-xoauth2-with-refresh-tokens-in-1password.md) · [Gmail runbook](docs/runbooks/gmail-xoauth2.md)
 - [x] Built-in `one_time_codes` filter (2FA codes, sign-in links, verification emails), on by default
 - [ ] Deferred minor issues — see [docs/TODO.md](docs/TODO.md)
 

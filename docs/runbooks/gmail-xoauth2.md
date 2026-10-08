@@ -1,0 +1,180 @@
+# Runbook: Gmail with XOAUTH2
+
+Set up a Gmail account in tp-imap-mcp using OAuth 2.0 (SASL XOAUTH2) instead
+of an app password. Design: [spec](../superpowers/specs/2026-10-07-oauth2-design.md),
+[ADR 0020](../adr/0020-xoauth2-with-refresh-tokens-in-1password.md).
+
+> [!WARNING]
+> While your Google OAuth app is in **Testing** status, Google expires its
+> refresh tokens after **7 days**. You will repeat step 6 weekly unless you
+> publish the app (see [Keeping access beyond 7 days](#keeping-access-beyond-7-days)).
+> If that is not acceptable, an [app password](https://myaccount.google.com/apppasswords)
+> with `IMAP_<NAME>_AUTH=password` is the simpler choice.
+
+**Time:** about 15 minutes. **You need:** a Google account (Gmail or Google
+Workspace), access to [Google Cloud Console](https://console.cloud.google.com/),
+the 1Password CLI (`op`), and a tp-imap-mcp build.
+
+Throughout, the account is called `gmail` (env prefix `IMAP_GMAIL_`) and the
+1Password item `Gmail OAuth` in vault `Private`. Substitute your own names.
+
+---
+
+## 1. Create a Google Cloud project
+
+1. Open <https://console.cloud.google.com/> and sign in with the Google account
+   whose mail you want to read (or any account you administer).
+2. Project picker → **New project** → name it e.g. `tp-imap-mcp` → **Create**.
+3. Make sure the new project is selected in the picker.
+
+## 2. Configure the OAuth consent screen
+
+Google Cloud Console → **Google Auth Platform** (older UI: *APIs & Services →
+OAuth consent screen*).
+
+1. **Branding:** app name `tp-imap-mcp`, user support email = your address,
+   developer contact = your address. Save.
+2. **Audience:** user type **External** (or **Internal** for a Workspace
+   account used only inside your organization — internal apps have no 7-day
+   limit). Leave the publishing status as **Testing** for now.
+3. **Audience → Test users:** **Add users** → your Gmail address. Only listed
+   test users can authorize a Testing app.
+4. **Data access:** **Add or remove scopes** → add
+   `https://mail.google.com/` (listed as a *restricted* scope: "Read, compose,
+   send, and permanently delete all your email from Gmail"). Save.
+
+## 3. Create the OAuth client
+
+Google Auth Platform → **Clients** → **Create client**:
+
+- **Application type:** **Desktop app** (required: Desktop clients accept the
+  `http://127.0.0.1:<port>/` loopback redirect tp-imap-mcp uses, with no
+  redirect URI to register).
+- **Name:** `tp-imap-mcp`.
+- **Create**, then copy the **Client ID** and **Client secret** (or download
+  the JSON).
+
+> For a Desktop app the client secret is not truly secret (Google says so), but
+> keep it in 1Password anyway.
+
+## 4. Check that IMAP is available
+
+Gmail → ⚙ **See all settings** → **Forwarding and POP/IMAP**: IMAP access
+should be enabled (Google enables it for all personal accounts). Workspace
+admins can restrict IMAP or third-party OAuth apps in the Admin console; if
+step 6 or 7 fails with an access error, check there.
+
+## 5. Store the credentials in 1Password
+
+```bash
+op item create --vault Private --category "API Credential" --title "Gmail OAuth" \
+  "client id[text]=<CLIENT_ID>" \
+  "client secret[password]=<CLIENT_SECRET>"
+```
+
+Then add the account to `imap.env` (keep any existing accounts; add `gmail` to
+`IMAP_ACCOUNTS`):
+
+```bash
+IMAP_ACCOUNTS=tetra,gmail
+
+IMAP_GMAIL_HOST=imap.gmail.com
+IMAP_GMAIL_LOGIN=you@gmail.com
+IMAP_GMAIL_AUTH=oauth2
+IMAP_GMAIL_OAUTH_PROVIDER=google
+IMAP_GMAIL_OAUTH_CLIENT_ID=op://Private/Gmail OAuth/client id
+IMAP_GMAIL_OAUTH_CLIENT_SECRET=op://Private/Gmail OAuth/client secret
+# Enable after step 6 (the field does not exist yet, and `op run` fails on
+# references to missing fields):
+# IMAP_GMAIL_OAUTH_REFRESH_TOKEN=op://Private/Gmail OAuth/refresh token
+```
+
+`IMAP_GMAIL_PASSWORD` must **not** be set for an OAuth account.
+
+## 6. Authorize and obtain the refresh token
+
+```bash
+op run --env-file imap.env -- tp_imap_mcp auth gmail
+```
+
+1. Your browser opens Google's consent page (the URL is also printed, in case
+   it does not open). Choose the Gmail account you added as a test user.
+2. Google warns **"Google hasn't verified this app"**. This is expected for
+   your own Testing app: **Advanced → Go to tp-imap-mcp (unsafe)**.
+3. Grant access to Gmail. The browser shows "Authorization received. You can
+   close this tab."
+4. The terminal prints the **refresh token** on one line, once. Nothing is
+   written to disk.
+
+Store it, then enable the reference line in `imap.env`:
+
+```bash
+op item edit "Gmail OAuth" --vault Private "refresh token[password]=<THE TOKEN>"
+```
+
+```bash
+IMAP_GMAIL_OAUTH_REFRESH_TOKEN=op://Private/Gmail OAuth/refresh token
+```
+
+> Clear your terminal scrollback afterwards if others can see your screen.
+
+## 7. Verify
+
+```bash
+op run --env-file imap.env -- ./zig-out/bin/tp_imap_mcp </dev/null
+# tp-imap-mcp: serving 2 account(s) on stdio; cache: …; filters: … gmail=password_reset,one_time_codes
+
+op run --env-file imap.env -- zig build itest -- gmail
+# … PASS lines …
+# 0 failure(s)
+```
+
+The live checks log in with XOAUTH2, refreshing an access token first. If the
+MCP client is already registered, reconnect it (`/mcp` in Claude Code) so it
+picks up the new account.
+
+---
+
+## Day-to-day
+
+- Access tokens are refreshed automatically (in memory, 5 minutes before they
+  expire); nothing to do.
+- When the refresh token stops working you will see a tool error:
+  `account "gmail": the OAuth refresh token was rejected (expired or revoked);
+  run op run --env-file imap.env -- tp_imap_mcp auth gmail and store the new
+  token`. Repeat step 6 (comment out the refresh-token line first only if the
+  1Password field was deleted; otherwise just overwrite it with `op item edit`).
+
+## Keeping access beyond 7 days
+
+Refresh tokens of **External** apps in **Testing** expire after 7 days. Options:
+
+- **Accept weekly re-authorization** (step 6).
+- **Workspace accounts:** set the audience to **Internal** (no 7-day limit,
+  no verification for internal use).
+- **Publish the app:** Google Auth Platform → Audience → **Publish app**.
+  Apps requesting the restricted `https://mail.google.com/` scope may require
+  Google's verification (and possibly a security assessment) before broad use;
+  check Google's current policy for personal-use apps before relying on this.
+- **Use an app password** instead (requires 2-Step Verification):
+  `IMAP_GMAIL_AUTH=password` (or unset) and `IMAP_GMAIL_PASSWORD=op://…`.
+
+## Revoking access
+
+<https://myaccount.google.com/permissions> → **tp-imap-mcp** → **Remove
+access**. The stored refresh token stops working immediately; delete it from
+1Password too.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `Error 400: redirect_uri_mismatch` | The OAuth client is not of type **Desktop app**. Create a Desktop client (step 3) and update the client ID/secret. |
+| `Error 403: access_denied` / "has not completed the Google verification process" | Your address is not a **test user** (step 2.3), or a Workspace admin blocks the app. |
+| `IMAP_GMAIL_OAUTH_CLIENT_SECRET is missing or empty` | Google requires the client secret; check the 1Password reference. |
+| `op run` fails: `item 'Private/Gmail OAuth' does not have a field 'refresh token'` | You enabled the refresh-token line before step 6; comment it out, run `auth`, store the token, re-enable. |
+| `The provider returned no refresh token` | Google issues one only on fresh consent: remove access at myaccount.google.com/permissions and run `auth` again. |
+| `the OAuth refresh token was rejected (expired or revoked)` | 7-day Testing expiry, password change, or revoked access: repeat step 6. |
+| `OAuth login failed: … Invalid credentials` | The token lacks the `https://mail.google.com/` scope (step 2.4), IMAP is disabled, or `IMAP_GMAIL_LOGIN` is not the authorized address. |
+| `Timed out waiting for the authorization redirect` | Complete the consent within 5 minutes; if the browser shows "connection refused", make sure nothing blocks `127.0.0.1`. |
+| `error initializing client: authorization timeout` (from `op`) | Approve the 1Password prompt (Touch ID) in time, or unlock 1Password first. |

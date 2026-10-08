@@ -9,6 +9,8 @@ const imap = @import("imap/session.zig");
 const mutf7 = @import("imap/mutf7.zig");
 const Store = @import("cache/store.zig").Store;
 const Filter = @import("filter/rules.zig").Filter;
+const token = @import("oauth/token.zig");
+const provider = @import("oauth/provider.zig");
 const text = @import("text.zig");
 const unicode = @import("sanitize/unicode.zig");
 
@@ -21,6 +23,11 @@ const log = std.log.scoped(.accounts);
 
 pub const Registry = struct {
     gpa: Allocator,
+    io: std.Io,
+    /// HTTPS client for OAuth token requests, created on first use.
+    token_client: ?token.Client = null,
+    /// Test seam: let the token client use plain http to 127.0.0.1.
+    allow_insecure_token_loopback: bool = false,
     accounts: []config.Account,
     settings: config.Settings,
     slots: []Slot,
@@ -37,11 +44,13 @@ pub const Registry = struct {
         session: ?Session = null,
         drafts: ?[:0]u8 = null, // wire-encoded, owned by gpa
         cache_path: ?[:0]u8 = null, // owned by gpa; set when the cache is opened
+        access: ?token.AccessToken = null, // OAuth access token; value owned by gpa, NUL-terminated
         cache: CacheState = .unopened,
     };
 
     pub fn init(
         gpa: Allocator,
+        io: std.Io,
         accounts: []config.Account,
         settings: config.Settings,
         active_filters: []const []const *const Filter,
@@ -49,7 +58,7 @@ pub const Registry = struct {
         if (active_filters.len != accounts.len) return error.FilterCountMismatch;
         const slots = try gpa.alloc(Slot, accounts.len);
         @memset(slots, .{});
-        return .{ .gpa = gpa, .accounts = accounts, .settings = settings, .slots = slots, .active_filters = active_filters };
+        return .{ .gpa = gpa, .io = io, .accounts = accounts, .settings = settings, .slots = slots, .active_filters = active_filters };
     }
 
     pub fn deinit(self: *Registry) void {
@@ -57,6 +66,7 @@ pub const Registry = struct {
             if (slot.session) |*s| s.close();
             if (slot.drafts) |d| self.gpa.free(d);
             if (slot.cache_path) |cp| self.gpa.free(cp);
+            self.forgetAccessToken(slot);
             switch (slot.cache) {
                 .open => |*store| store.close(),
                 else => {},
@@ -64,7 +74,63 @@ pub const Registry = struct {
             account.wipe();
         }
         self.gpa.free(self.slots);
+        if (self.token_client) |*tc| tc.deinit();
         self.* = undefined;
+    }
+
+    fn forgetAccessToken(self: *Registry, slot: *Slot) void {
+        if (slot.access) |t| {
+            std.crypto.secureZero(u8, t.value);
+            self.gpa.free(t.value);
+        }
+        slot.access = null;
+    }
+
+    /// The account's OAuth access token, refreshed when absent, near expiry,
+    /// or `force`d (after the server rejected it). Kept only in memory.
+    pub fn accessToken(self: *Registry, idx: usize, force: bool) Error![:0]const u8 {
+        const slot = &self.slots[idx];
+        const a = &self.accounts[idx];
+        const o = a.auth.oauth2;
+        const now = std.Io.Timestamp.now(self.io, .real).toSeconds();
+        if (!force and !token.needsRefresh(slot.access, now)) return slot.access.?.value[0 .. slot.access.?.value.len - 1 :0];
+        self.forgetAccessToken(slot);
+
+        const rt = o.refresh_token orelse {
+            self.setDiag("account \"{s}\": no OAuth refresh token; run `op run --env-file imap.env -- tp_imap_mcp auth {s}`", .{ a.name, a.name });
+            return error.LoginFailed;
+        };
+        if (self.token_client == null) {
+            self.token_client = token.Client.init(self.gpa, self.io, self.settings.ca_file) catch {
+                self.setDiag("account \"{s}\": cannot load the CA bundle {s} for OAuth", .{ a.name, self.settings.ca_file });
+                return error.LoginFailed;
+            };
+        }
+        self.token_client.?.allow_insecure_loopback = self.allow_insecure_token_loopback;
+        var arena_state: std.heap.ArenaAllocator = .init(self.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const ep = try provider.endpoints(arena, o.provider, o.tenant, o.custom);
+        const resp = self.token_client.?.refresh(arena, ep, o.client_id, o.client_secret, rt) catch |err| {
+            self.setDiag("account \"{s}\": OAuth token request failed ({t})", .{ a.name, err });
+            return error.LoginFailed;
+        };
+        switch (resp) {
+            .ok => |ok| {
+                // A rotated refresh token in the response is ignored (ADR 0020).
+                const value = try self.gpa.dupeSentinel(u8, ok.access_token, 0);
+                slot.access = .{ .value = value[0 .. value.len + 1], .expires_at = now + ok.expires_in };
+                return value;
+            },
+            .failed => |f| {
+                if (std.mem.eql(u8, f.code, "invalid_grant")) {
+                    self.setDiag("account \"{s}\": the OAuth refresh token was rejected (expired or revoked); run `op run --env-file imap.env -- tp_imap_mcp auth {s}` and store the new token", .{ a.name, a.name });
+                } else {
+                    self.setDiag("account \"{s}\": OAuth token request failed: {s}{s}{s}", .{ a.name, f.code, if (f.description.len > 0) ": " else "", f.description });
+                }
+                return error.LoginFailed;
+            },
+        }
     }
 
     pub fn find(self: *Registry, name: []const u8) ?usize {
@@ -147,17 +213,35 @@ pub const Registry = struct {
             }
             return err;
         };
-        s.login(a.login, a.password) catch |err| {
-            var buf: [400]u8 = undefined;
-            self.setDiag("account \"{s}\": login failed: {s}", .{ a.name, unicode.cleanInto(&buf, s.lastResponse()) });
+        self.authenticate(idx, &s) catch |err| {
             s.abandon();
-            return switch (err) {
-                error.ServerRejected => error.LoginFailed,
-                else => err,
-            };
+            return err;
         };
         slot.session = s;
         return &slot.session.?;
+    }
+
+    /// Password LOGIN or XOAUTH2 (one token refresh-and-retry on rejection).
+    fn authenticate(self: *Registry, idx: usize, s: *Session) Error!void {
+        const a = &self.accounts[idx];
+        var buf: [400]u8 = undefined;
+        switch (a.auth) {
+            .password => s.login(a.login, a.password) catch |err| {
+                self.setDiag("account \"{s}\": login failed: {s}", .{ a.name, unicode.cleanInto(&buf, s.lastResponse()) });
+                return if (err == error.ServerRejected) error.LoginFailed else err;
+            },
+            .oauth2 => {
+                const first = try self.accessToken(idx, false);
+                s.oauth2Login(a.login, first) catch |err| {
+                    if (err != error.ServerRejected) return err;
+                    const fresh = try self.accessToken(idx, true);
+                    s.oauth2Login(a.login, fresh) catch |err2| {
+                        self.setDiag("account \"{s}\": OAuth login failed: {s}", .{ a.name, unicode.cleanInto(&buf, s.lastResponse()) });
+                        return if (err2 == error.ServerRejected) error.LoginFailed else err2;
+                    };
+                };
+            },
+        }
     }
 
     fn drop(self: *Registry, idx: usize) void {
@@ -358,7 +442,7 @@ test "unreachable server reports a connect diagnostic without the password" {
     const pw = try testing.allocator.dupeSentinel(u8, "s3cret", 0);
     defer testing.allocator.free(pw);
     var accounts = [_]config.Account{localAccount(pw, null)};
-    var reg: Registry = try .init(testing.allocator, &accounts, no_cache, &no_filters_1);
+    var reg: Registry = try .init(testing.allocator, testing.io, &accounts, no_cache, &no_filters_1);
     defer reg.deinit();
 
     try testing.expectEqual(0, reg.find("LOCAL").?);
@@ -374,7 +458,7 @@ test "configured drafts override is encoded without contacting the server" {
     const pw = try testing.allocator.dupeSentinel(u8, "x", 0);
     defer testing.allocator.free(pw);
     var accounts = [_]config.Account{localAccount(pw, "Entwürfe")};
-    var reg: Registry = try .init(testing.allocator, &accounts, no_cache, &no_filters_1);
+    var reg: Registry = try .init(testing.allocator, testing.io, &accounts, no_cache, &no_filters_1);
     defer reg.deinit();
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
@@ -390,7 +474,7 @@ test "fresh cached mailbox list is served without the server; clearCache empties
     const pw = try testing.allocator.dupeSentinel(u8, "x", 0);
     defer testing.allocator.free(pw);
     var accounts = [_]config.Account{localAccount(pw, null)};
-    var reg: Registry = try .init(testing.allocator, &accounts, .{ .cache_dir = dir, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = config.default_ca_file }, &no_filters_1);
+    var reg: Registry = try .init(testing.allocator, testing.io, &accounts, .{ .cache_dir = dir, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = config.default_ca_file }, &no_filters_1);
     defer reg.deinit();
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
@@ -425,7 +509,7 @@ test "corrupt cache file is rebuilt" {
     const pw = try testing.allocator.dupeSentinel(u8, "x", 0);
     defer testing.allocator.free(pw);
     var accounts = [_]config.Account{localAccount(pw, null)};
-    var reg: Registry = try .init(testing.allocator, &accounts, .{ .cache_dir = dir, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = config.default_ca_file }, &no_filters_1);
+    var reg: Registry = try .init(testing.allocator, testing.io, &accounts, .{ .cache_dir = dir, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = config.default_ca_file }, &no_filters_1);
     defer reg.deinit();
     try testing.expect(reg.cache(0) != null);
 }
@@ -434,7 +518,7 @@ test "caching disabled: no store, clearCache reports false" {
     const pw = try testing.allocator.dupeSentinel(u8, "x", 0);
     defer testing.allocator.free(pw);
     var accounts = [_]config.Account{localAccount(pw, null)};
-    var reg: Registry = try .init(testing.allocator, &accounts, no_cache, &no_filters_1);
+    var reg: Registry = try .init(testing.allocator, testing.io, &accounts, no_cache, &no_filters_1);
     defer reg.deinit();
     try testing.expect(reg.cache(0) == null);
     try testing.expect(!reg.clearCache(0));
@@ -444,7 +528,7 @@ test "todo: active filters are required and must match the account count" {
     const pw = try testing.allocator.dupeSentinel(u8, "x", 0);
     defer testing.allocator.free(pw);
     var accounts = [_]config.Account{localAccount(pw, null)};
-    try testing.expectError(error.FilterCountMismatch, Registry.init(testing.allocator, &accounts, no_cache, &.{}));
+    try testing.expectError(error.FilterCountMismatch, Registry.init(testing.allocator, testing.io, &accounts, no_cache, &.{}));
 }
 
 test "todo: a cache found corrupt during use is deleted (with -wal/-shm) for rebuild" {
@@ -455,7 +539,7 @@ test "todo: a cache found corrupt during use is deleted (with -wal/-shm) for reb
     const pw = try testing.allocator.dupeSentinel(u8, "x", 0);
     defer testing.allocator.free(pw);
     var accounts = [_]config.Account{localAccount(pw, null)};
-    var reg: Registry = try .init(testing.allocator, &accounts, .{ .cache_dir = dir, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = config.default_ca_file }, &no_filters_1);
+    var reg: Registry = try .init(testing.allocator, testing.io, &accounts, .{ .cache_dir = dir, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = config.default_ca_file }, &no_filters_1);
     defer reg.deinit();
     try testing.expect(reg.cache(0) != null);
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "local.sqlite3-wal", .data = "x" });
@@ -465,4 +549,61 @@ test "todo: a cache found corrupt during use is deleted (with -wal/-shm) for reb
     for ([_][]const u8{ "local.sqlite3", "local.sqlite3-wal", "local.sqlite3-shm" }) |name| {
         try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, name, .{}));
     }
+}
+
+
+fn oauthAccount(token_url: []const u8, refresh_token: [:0]u8) config.Account {
+    return .{
+        .name = "ms",
+        .host = "127.0.0.1",
+        .port = 1,
+        .login = "me@contoso.com",
+        .password = @constCast(&[_:0]u8{}),
+        .readonly = false,
+        .drafts = null,
+        .auth = .{ .oauth2 = .{
+            .provider = .custom,
+            .client_id = "cid",
+            .client_secret = null,
+            .refresh_token = refresh_token,
+            .tenant = "common",
+            .custom = .{ .auth_url = "https://unused", .token_url = token_url, .scope = "imap" },
+        } },
+    };
+}
+
+test "oauth: access token is fetched once and cached until near expiry" {
+    const fake = try token.FakeServer.start("HTTP/1.1 200 OK\r\nContent-Length: 44\r\nConnection: close\r\n\r\n{\"access_token\":\"AT-ONE\",\"expires_in\":3600}");
+    defer fake.destroy();
+    const thread = try std.Thread.spawn(.{}, token.FakeServer.serveOne, .{fake});
+    const url = try testing.allocator.print("http://127.0.0.1:{d}/token", .{fake.port()});
+    defer testing.allocator.free(url);
+    var rt = [_:0]u8{ 'R', 'T' }; // writable: Registry.deinit wipes it
+    var accounts = [_]config.Account{oauthAccount(url, &rt)};
+    var reg: Registry = try .init(testing.allocator, testing.io, &accounts, no_cache, &no_filters_1);
+    defer reg.deinit();
+    reg.allow_insecure_token_loopback = true;
+
+    try testing.expectEqualStrings("AT-ONE", try reg.accessToken(0, false));
+    thread.join();
+    // Served from memory: the fake server is gone, so a request would fail.
+    try testing.expectEqualStrings("AT-ONE", try reg.accessToken(0, false));
+}
+
+test "oauth: invalid_grant tells the user to re-run auth, without the token" {
+    const fake = try token.FakeServer.start("HTTP/1.1 400 Bad Request\r\nContent-Length: 25\r\nConnection: close\r\n\r\n{\"error\":\"invalid_grant\"}");
+    defer fake.destroy();
+    const thread = try std.Thread.spawn(.{}, token.FakeServer.serveOne, .{fake});
+    const url = try testing.allocator.print("http://127.0.0.1:{d}/token", .{fake.port()});
+    defer testing.allocator.free(url);
+    var rt = [_:0]u8{ 'R', 'T' }; // writable: Registry.deinit wipes it
+    var accounts = [_]config.Account{oauthAccount(url, &rt)};
+    var reg: Registry = try .init(testing.allocator, testing.io, &accounts, no_cache, &no_filters_1);
+    defer reg.deinit();
+    reg.allow_insecure_token_loopback = true;
+
+    try testing.expectError(error.LoginFailed, reg.accessToken(0, false));
+    thread.join();
+    try testing.expect(std.mem.find(u8, reg.diag(), "tp_imap_mcp auth ms") != null);
+    try testing.expect(std.mem.find(u8, reg.diag(), "RT") == null);
 }

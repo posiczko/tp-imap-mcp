@@ -67,7 +67,7 @@ pub fn main(init: std.process.Init) !u8 {
     settings.mailbox_ttl = 3600;
     const no_filters = try arena.alloc([]const *const filter.Filter, accounts.len);
     @memset(no_filters, &.{});
-    var reg: Registry = try .init(init.gpa, accounts, settings, no_filters);
+    var reg: Registry = try .init(init.gpa, init.io, accounts, settings, no_filters);
     defer reg.deinit();
     const idx = reg.find(account) orelse {
         std.debug.print("unknown account {s}\n", .{account});

@@ -962,7 +962,7 @@ test "alignToUids follows input order, repeats duplicates, nulls missing" {
 
 fn testRegistry(accts: []config.Account) !Registry {
     const none = [_][]const *const filter.Filter{ &.{}, &.{} };
-    return Registry.init(testing.allocator, accts, .{ .cache_dir = null, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = config.default_ca_file }, &none);
+    return Registry.init(testing.allocator, testing.io, accts, .{ .cache_dir = null, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = config.default_ca_file }, &none);
 }
 
 fn testAccounts() [2]config.Account {

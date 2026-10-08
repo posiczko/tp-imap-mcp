@@ -12,7 +12,7 @@ here. Superseded ADRs stay, marked "Superseded by NNNN".
 | [0005](0005-hand-written-mcp-over-stdio.md) | Implement MCP by hand over stdio | Accepted |
 | [0006](0006-one-process-many-accounts.md) | Serve multiple accounts from one process | Accepted |
 | [0007](0007-credentials-from-op-run-environment.md) | Take credentials from the environment, injected by `op run` | Accepted |
-| [0008](0008-password-login-over-implicit-tls.md) | Authenticate with password LOGIN over implicit TLS only | Accepted |
+| [0008](0008-password-login-over-implicit-tls.md) | Authenticate with password LOGIN over implicit TLS only | Accepted (password-only superseded by 0020) |
 | [0009](0009-defer-pgp-decryption.md) | Defer PGP/MIME decryption | Accepted |
 | [0010](0010-write-tools-with-read-only-switch.md) | Keep the write tools, with a per-account read-only switch | Accepted |
 | [0011](0011-raw-search-criteria-with-validation.md) | Pass search criteria through raw, and validate all inputs | Accepted |
@@ -24,3 +24,4 @@ here. Superseded ADRs stay, marked "Superseded by NNNN".
 | [0017](0017-sensitive-content-filters.md) | Withhold sensitive messages with header-based filters | Accepted |
 | [0018](0018-sanitize-model-bound-output.md) | Sanitize all model-bound output | Accepted |
 | [0019](0019-decoded-sanitized-header-values.md) | Return header values decoded and sanitized | Accepted |
+| [0020](0020-xoauth2-with-refresh-tokens-in-1password.md) | Support XOAUTH2 with refresh tokens kept in 1Password | Accepted |

@@ -35,6 +35,8 @@ int tpi_connect(tpi_session *s, const char *host, uint16_t port, long timeout_se
  * -1 if unavailable. Release *der with tpi_buf_free. */
 long tpi_peer_certificate(tpi_session *s, char **der);
 int tpi_login(tpi_session *s, const char *user, const char *password);
+/* SASL XOAUTH2 with a bearer access token (ADR 0020). */
+int tpi_oauth2_login(tpi_session *s, const char *user, const char *access_token);
 int tpi_noop(tpi_session *s);
 int tpi_logout(tpi_session *s);
 /* On success *uidvalidity is the mailbox's UIDVALIDITY (0 if the server did

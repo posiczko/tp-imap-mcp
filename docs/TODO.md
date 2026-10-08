@@ -1,7 +1,32 @@
 # TODO
 
-No open items. Everything deferred from the code reviews is done (below);
-add new items here as they come up.
+- [ ] **Confirm OAuth live:** Gmail via the runbook; Microsoft loopback
+  registration (`http://127.0.0.1`, root path) per spec §9 — Entra may need it
+  added via the app manifest (`replyUrlsWithType`).
+
+### From the OAuth review (2026-10-07)
+
+- [ ] **`auth` listener can hang past 5 minutes** if a local client connects
+  and sends nothing (`flow.awaitCallback` reads without a timeout). *Fix:*
+  receive timeout on the accepted socket.
+- [ ] **`error=` aborts the flow without a `state` check**, and a transient
+  `accept` error aborts it too. *Fix:* honor `error=` only with the matching
+  `state`; ignore transient accept errors.
+- [ ] **A rejected access token stays cached** after the final failed login,
+  costing an extra login attempt per later call. *Fix:* forget it on the
+  second failure.
+- [ ] **Non-rejection failures on the first XOAUTH2 attempt** (e.g. connection
+  lost) carry no account diagnostic. *Fix:* `setDiag` on every failure path.
+- [ ] **Remaining secret copies are not zeroed** (arena-held parsed token,
+  std.http and libetpan buffers). Cosmetic; note or zero what we own.
+- [ ] **Token response bodies are unbounded.** *Fix:* cap at 64 KiB.
+- [ ] **The browser shows "Authorization received" for failures too.** *Fix:*
+  separate failure page.
+- [ ] **The suggested `op item edit … field=<token>` puts the token in shell
+  history and argv.** *Fix:* document a safer entry method.
+- [ ] **PKCE/state use `io.random`**; `io.randomSecure` fails closed. Nit.
+- [ ] **No offline test for the refresh-and-retry login path** (needs a fake
+  IMAP server); covered only by the live OAuth check.
 
 ## Done (2026-10-07 cleanup)
 

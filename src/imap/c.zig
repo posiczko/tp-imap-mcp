@@ -41,6 +41,7 @@ pub extern fn tpi_free(s: *Session) void;
 pub extern fn tpi_connect(s: *Session, host: [*:0]const u8, port: u16, timeout_sec: c_long, ca_file: [*:0]const u8) c_int;
 pub extern fn tpi_peer_certificate(s: *Session, der: *?[*]u8) c_long;
 pub extern fn tpi_login(s: *Session, user: [*:0]const u8, password: [*:0]const u8) c_int;
+pub extern fn tpi_oauth2_login(s: *Session, user: [*:0]const u8, access_token: [*:0]const u8) c_int;
 pub extern fn tpi_noop(s: *Session) c_int;
 pub extern fn tpi_logout(s: *Session) c_int;
 pub extern fn tpi_examine(s: *Session, mailbox: [*:0]const u8, uidvalidity: *u32) c_int;

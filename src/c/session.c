@@ -111,6 +111,10 @@ int tpi_login(tpi_session *s, const char *user, const char *password) {
   return map_error(mailimap_login(s->imap, user, password));
 }
 
+int tpi_oauth2_login(tpi_session *s, const char *user, const char *access_token) {
+  return map_error(mailimap_oauth2_authenticate(s->imap, user, access_token));
+}
+
 int tpi_noop(tpi_session *s) { return map_error(mailimap_noop(s->imap)); }
 
 int tpi_logout(tpi_session *s) { return map_error(mailimap_logout(s->imap)); }

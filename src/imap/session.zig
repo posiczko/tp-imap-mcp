@@ -113,6 +113,10 @@ pub const Session = struct {
         try check(c.tpi_login(self.handle, user, password));
     }
 
+    pub fn oauth2Login(self: *Session, user: [:0]const u8, access_token: [:0]const u8) Error!void {
+        try check(c.tpi_oauth2_login(self.handle, user, access_token));
+    }
+
     pub fn noop(self: *Session) Error!void {
         try check(c.tpi_noop(self.handle));
     }

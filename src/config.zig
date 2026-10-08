@@ -3,6 +3,19 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const provider = @import("oauth/provider.zig");
+
+/// OAuth 2.0 settings for an account with IMAP_<NAME>_AUTH=oauth2 (ADR 0020).
+pub const OAuthConfig = struct {
+    provider: provider.Kind,
+    client_id: [:0]const u8,
+    client_secret: ?[:0]u8, // mutable so it can be zeroed
+    refresh_token: ?[:0]u8, // null only in `auth` mode for the account being authorized
+    tenant: []const u8, // microsoft
+    custom: provider.Endpoints, // custom
+};
+
+pub const Auth = union(enum) { password, oauth2: OAuthConfig };
 
 pub const Account = struct {
     name: []const u8, // as written in IMAP_ACCOUNTS
@@ -12,10 +25,23 @@ pub const Account = struct {
     password: [:0]u8, // mutable so it can be zeroed
     readonly: bool,
     drafts: ?[]const u8, // UTF-8; null = discover via \Drafts
+    auth: Auth = .password,
 
     pub fn wipe(self: *Account) void {
         std.crypto.secureZero(u8, self.password);
+        switch (self.auth) {
+            .password => {},
+            .oauth2 => |o| {
+                if (o.client_secret) |cs| std.crypto.secureZero(u8, cs);
+                if (o.refresh_token) |rt| std.crypto.secureZero(u8, rt);
+            },
+        }
     }
+};
+
+pub const LoadOptions = struct {
+    /// `auth` mode: this account (case-insensitive) may lack a refresh token.
+    auth_account: ?[]const u8 = null,
 };
 
 pub const Error = error{InvalidConfig} || Allocator.Error;
@@ -24,6 +50,10 @@ pub const Error = error{InvalidConfig} || Allocator.Error;
 /// includes a variable's value. `env` is anything with
 /// `fn get(self, []const u8) ?[]const u8`.
 pub fn load(arena: Allocator, env: anytype, diag: *std.Io.Writer) Error![]Account {
+    return loadWith(arena, env, diag, .{});
+}
+
+pub fn loadWith(arena: Allocator, env: anytype, diag: *std.Io.Writer, opts: LoadOptions) Error![]Account {
     const list = nonEmpty(env, "IMAP_ACCOUNTS") orelse
         return fail(diag, "IMAP_ACCOUNTS is missing or empty", .{});
 
@@ -43,14 +73,31 @@ pub fn load(arena: Allocator, env: anytype, diag: *std.Io.Writer) Error![]Accoun
     var accounts: std.ArrayList(Account) = .empty;
     for (names.items) |name| {
         const prefix = try std.ascii.allocUpperString(arena, name);
+        const host = try required(arena, env, diag, prefix, "HOST");
+        const port_n = try port(arena, env, diag, prefix);
+        const login = try required(arena, env, diag, prefix, "LOGIN");
+        const auth_key = try varName(arena, prefix, "AUTH");
+        const auth_kind = nonEmpty(env, auth_key) orelse "password";
+        var password: [:0]u8 = undefined;
+        var auth: Auth = .password;
+        if (std.ascii.eqlIgnoreCase(auth_kind, "password")) {
+            password = try required(arena, env, diag, prefix, "PASSWORD");
+        } else if (std.ascii.eqlIgnoreCase(auth_kind, "oauth2")) {
+            const pw_key = try varName(arena, prefix, "PASSWORD");
+            if (nonEmpty(env, pw_key) != null) return fail(diag, "{s} must not be set when {s}=oauth2", .{ pw_key, auth_key });
+            password = try arena.dupeSentinel(u8, "", 0);
+            const exempt = if (opts.auth_account) |aa| std.ascii.eqlIgnoreCase(aa, name) else false;
+            auth = .{ .oauth2 = try oauthConfig(arena, env, diag, prefix, name, exempt) };
+        } else return fail(diag, "{s} must be password or oauth2", .{auth_key});
         try accounts.append(arena, .{
             .name = name,
-            .host = try required(arena, env, diag, prefix, "HOST"),
-            .port = try port(arena, env, diag, prefix),
-            .login = try required(arena, env, diag, prefix, "LOGIN"),
-            .password = try required(arena, env, diag, prefix, "PASSWORD"),
+            .host = host,
+            .port = port_n,
+            .login = login,
+            .password = password,
             .readonly = try flag(arena, env, diag, prefix, "READONLY"),
             .drafts = nonEmpty(env, try varName(arena, prefix, "DRAFTS")),
+            .auth = auth,
         });
     }
     return accounts.toOwnedSlice(arena);
@@ -139,6 +186,37 @@ fn xdgDir(arena: Allocator, env: anytype, xdg_var: []const u8, home_sub: []const
 pub fn find(accounts: []Account, name: []const u8) ?*Account {
     for (accounts) |*a| if (std.ascii.eqlIgnoreCase(a.name, name)) return a;
     return null;
+}
+
+fn oauthConfig(arena: Allocator, env: anytype, diag: *std.Io.Writer, prefix: []const u8, name: []const u8, refresh_optional: bool) Error!OAuthConfig {
+    const pkey = try varName(arena, prefix, "OAUTH_PROVIDER");
+    const kind = std.meta.stringToEnum(provider.Kind, nonEmpty(env, pkey) orelse "") orelse
+        return fail(diag, "{s} must be google, microsoft or custom", .{pkey});
+    const client_id = try required(arena, env, diag, prefix, "OAUTH_CLIENT_ID");
+    const secret: ?[:0]u8 = if (kind == .google)
+        try required(arena, env, diag, prefix, "OAUTH_CLIENT_SECRET")
+    else if (nonEmpty(env, try varName(arena, prefix, "OAUTH_CLIENT_SECRET"))) |v| try arena.dupeSentinel(u8, v, 0) else null;
+    const rkey = try varName(arena, prefix, "OAUTH_REFRESH_TOKEN");
+    const refresh: ?[:0]u8 = if (nonEmpty(env, rkey)) |v| try arena.dupeSentinel(u8, v, 0) else if (refresh_optional) null else
+        return fail(diag, "{s} is missing or empty; run `tp_imap_mcp auth {s}` to obtain one", .{ rkey, name });
+    const tkey = try varName(arena, prefix, "OAUTH_TENANT");
+    const tenant = nonEmpty(env, tkey) orelse "common";
+    for (tenant) |ch| if (!std.ascii.isAlphanumeric(ch) and ch != '.' and ch != '-')
+        return fail(diag, "{s} must match [A-Za-z0-9.-]+", .{tkey});
+    var custom: provider.Endpoints = .{ .auth_url = "", .token_url = "", .scope = "" };
+    if (kind == .custom) {
+        custom.auth_url = try requiredHttps(arena, env, diag, prefix, "OAUTH_AUTH_URL");
+        custom.token_url = try requiredHttps(arena, env, diag, prefix, "OAUTH_TOKEN_URL");
+        custom.scope = try required(arena, env, diag, prefix, "OAUTH_SCOPE");
+    }
+    return .{ .provider = kind, .client_id = client_id, .client_secret = secret, .refresh_token = refresh, .tenant = tenant, .custom = custom };
+}
+
+fn requiredHttps(arena: Allocator, env: anytype, diag: *std.Io.Writer, prefix: []const u8, suffix: []const u8) Error![:0]u8 {
+    const v = try required(arena, env, diag, prefix, suffix);
+    if (!std.ascii.startsWithIgnoreCase(v, "https://"))
+        return fail(diag, "{s} must start with https://", .{try varName(arena, prefix, suffix)});
+    return v;
 }
 
 fn fail(diag: *std.Io.Writer, comptime fmt: []const u8, args: anytype) Error {
@@ -323,4 +401,76 @@ fn expectInvalidSettings(e: TestEnv, comptime expected_diag: []const u8) !void {
     var diag: std.Io.Writer = .fixed(&buf);
     try testing.expectError(error.InvalidConfig, loadSettings(arena_state.allocator(), e, &diag));
     try testing.expectEqualStrings(expected_diag, diag.buffered());
+}
+
+fn loadOne(a: Allocator, e: TestEnv, opts: LoadOptions) !Account {
+    var buf: [256]u8 = undefined;
+    var diag: std.Io.Writer = .fixed(&buf);
+    return (try loadWith(a, e, &diag, opts))[0];
+}
+
+fn expectInvalidWith(e: TestEnv, opts: LoadOptions, comptime expected_diag: []const u8) !void {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var buf: [256]u8 = undefined;
+    var diag: std.Io.Writer = .fixed(&buf);
+    try testing.expectError(error.InvalidConfig, loadWith(arena_state.allocator(), e, &diag, opts));
+    try testing.expectEqualStrings(expected_diag, diag.buffered());
+    try testing.expect(std.mem.find(u8, diag.buffered(), "s3cret") == null);
+}
+
+test "oauth2 accounts: presets, custom, auth-mode exemption" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const ms = try loadOne(a, testEnv(.{
+        .{ "IMAP_ACCOUNTS", "work" },                 .{ "IMAP_WORK_HOST", "outlook.office365.com" },
+        .{ "IMAP_WORK_LOGIN", "me@contoso.com" },     .{ "IMAP_WORK_AUTH", "oauth2" },
+        .{ "IMAP_WORK_OAUTH_PROVIDER", "microsoft" }, .{ "IMAP_WORK_OAUTH_CLIENT_ID", "cid" },
+        .{ "IMAP_WORK_OAUTH_REFRESH_TOKEN", "s3cret" },
+    }), .{});
+    try testing.expectEqual(.microsoft, ms.auth.oauth2.provider);
+    try testing.expectEqualStrings("common", ms.auth.oauth2.tenant);
+    try testing.expect(ms.auth.oauth2.client_secret == null);
+    try testing.expectEqualStrings("s3cret", ms.auth.oauth2.refresh_token.?);
+
+    const custom = try loadOne(a, testEnv(.{
+        .{ "IMAP_ACCOUNTS", "x" },                       .{ "IMAP_X_HOST", "h" },
+        .{ "IMAP_X_LOGIN", "l" },                        .{ "IMAP_X_AUTH", "oauth2" },
+        .{ "IMAP_X_OAUTH_PROVIDER", "custom" },          .{ "IMAP_X_OAUTH_CLIENT_ID", "c" },
+        .{ "IMAP_X_OAUTH_REFRESH_TOKEN", "r" },          .{ "IMAP_X_OAUTH_AUTH_URL", "https://idp/a" },
+        .{ "IMAP_X_OAUTH_TOKEN_URL", "HTTPS://idp/t" },  .{ "IMAP_X_OAUTH_SCOPE", "imap offline" },
+    }), .{});
+    try testing.expectEqualStrings("imap offline", custom.auth.oauth2.custom.scope);
+
+    // auth mode: the account being authorized may lack a refresh token.
+    const pending = try loadOne(a, testEnv(.{
+        .{ "IMAP_ACCOUNTS", "g" },       .{ "IMAP_G_HOST", "imap.gmail.com" },
+        .{ "IMAP_G_LOGIN", "me@x" },     .{ "IMAP_G_AUTH", "oauth2" },
+        .{ "IMAP_G_OAUTH_PROVIDER", "google" }, .{ "IMAP_G_OAUTH_CLIENT_ID", "c" },
+        .{ "IMAP_G_OAUTH_CLIENT_SECRET", "s3cret" },
+    }), .{ .auth_account = "G" });
+    try testing.expect(pending.auth.oauth2.refresh_token == null);
+
+    var acct = ms;
+    acct.wipe();
+    for (acct.auth.oauth2.refresh_token.?) |ch| try testing.expectEqual(0, ch);
+}
+
+test "oauth2 configuration errors" {
+    const base = .{
+        .{ "IMAP_ACCOUNTS", "w" }, .{ "IMAP_W_HOST", "h" }, .{ "IMAP_W_LOGIN", "l" },
+    };
+    try expectInvalidWith(testEnv(base ++ .{ .{ "IMAP_W_AUTH", "kerberos" } }), .{}, "IMAP_W_AUTH must be password or oauth2");
+    try expectInvalidWith(testEnv(base ++ .{ .{ "IMAP_W_AUTH", "oauth2" }, .{ "IMAP_W_PASSWORD", "s3cret" } }), .{}, "IMAP_W_PASSWORD must not be set when IMAP_W_AUTH=oauth2");
+    try expectInvalidWith(testEnv(base ++ .{ .{ "IMAP_W_AUTH", "oauth2" } }), .{}, "IMAP_W_OAUTH_PROVIDER must be google, microsoft or custom");
+    try expectInvalidWith(testEnv(base ++ .{ .{ "IMAP_W_AUTH", "oauth2" }, .{ "IMAP_W_OAUTH_PROVIDER", "microsoft" } }), .{}, "IMAP_W_OAUTH_CLIENT_ID is missing or empty");
+    try expectInvalidWith(testEnv(base ++ .{ .{ "IMAP_W_AUTH", "oauth2" }, .{ "IMAP_W_OAUTH_PROVIDER", "google" }, .{ "IMAP_W_OAUTH_CLIENT_ID", "c" }, .{ "IMAP_W_OAUTH_REFRESH_TOKEN", "s3cret" } }), .{}, "IMAP_W_OAUTH_CLIENT_SECRET is missing or empty");
+    try expectInvalidWith(testEnv(base ++ .{ .{ "IMAP_W_AUTH", "oauth2" }, .{ "IMAP_W_OAUTH_PROVIDER", "microsoft" }, .{ "IMAP_W_OAUTH_CLIENT_ID", "c" } }), .{}, "IMAP_W_OAUTH_REFRESH_TOKEN is missing or empty; run `tp_imap_mcp auth w` to obtain one");
+    try expectInvalidWith(testEnv(base ++ .{ .{ "IMAP_W_AUTH", "oauth2" }, .{ "IMAP_W_OAUTH_PROVIDER", "microsoft" }, .{ "IMAP_W_OAUTH_CLIENT_ID", "c" }, .{ "IMAP_W_OAUTH_REFRESH_TOKEN", "s3cret" }, .{ "IMAP_W_OAUTH_TENANT", "bad/tenant" } }), .{}, "IMAP_W_OAUTH_TENANT must match [A-Za-z0-9.-]+");
+    try expectInvalidWith(testEnv(base ++ .{ .{ "IMAP_W_AUTH", "oauth2" }, .{ "IMAP_W_OAUTH_PROVIDER", "custom" }, .{ "IMAP_W_OAUTH_CLIENT_ID", "c" }, .{ "IMAP_W_OAUTH_REFRESH_TOKEN", "s3cret" }, .{ "IMAP_W_OAUTH_AUTH_URL", "http://idp/a" }, .{ "IMAP_W_OAUTH_TOKEN_URL", "https://idp/t" }, .{ "IMAP_W_OAUTH_SCOPE", "x" } }), .{}, "IMAP_W_OAUTH_AUTH_URL must start with https://");
+    try expectInvalidWith(testEnv(base ++ .{ .{ "IMAP_W_AUTH", "oauth2" }, .{ "IMAP_W_OAUTH_PROVIDER", "custom" }, .{ "IMAP_W_OAUTH_CLIENT_ID", "c" }, .{ "IMAP_W_OAUTH_REFRESH_TOKEN", "s3cret" } }), .{}, "IMAP_W_OAUTH_AUTH_URL is missing or empty");
+    // password accounts still need a password
+    try expectInvalidWith(testEnv(base), .{}, "IMAP_W_PASSWORD is missing or empty");
 }

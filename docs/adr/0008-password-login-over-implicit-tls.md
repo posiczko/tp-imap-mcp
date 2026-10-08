@@ -1,6 +1,6 @@
 # 0008. Authenticate with password LOGIN over implicit TLS only
 
-- Status: Accepted
+- Status: Accepted; "password only" superseded by [0020](0020-xoauth2-with-refresh-tokens-in-1password.md) (implicit TLS still applies)
 - Date: 2026-10-07
 
 ## Context
