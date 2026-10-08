@@ -40,13 +40,13 @@ tp-imap-mcp exposes IMAP mailboxes to MCP clients (Claude Code, Claude Desktop, 
 
 ```bash
 brew install zig libetpan ca-certificates 1password-cli
-zig build -Doptimize=safe
+zig build -Doptimize=safe --prefix ~/.local                  # installs ~/.local/bin/tp_imap_mcp
 mkdir -p ~/.config/tp-imap-mcp
 cp imap.env.example ~/.config/tp-imap-mcp/imap.env    # edit: account names + op:// references
 chmod 600 ~/.config/tp-imap-mcp/imap.env
 ln -s ~/.config/tp-imap-mcp/imap.env imap.env         # so repo commands can say --env-file imap.env
 op run --env-file imap.env -- zig build itest -- <account>     # optional live check
-claude mcp add --scope user imap -- op run --env-file "$HOME/.config/tp-imap-mcp/imap.env" -- "$PWD/zig-out/bin/tp_imap_mcp"
+claude mcp add --scope user imap -- op run --env-file "$HOME/.config/tp-imap-mcp/imap.env" -- "$HOME/.local/bin/tp_imap_mcp"
 ```
 
 The full walkthrough follows.
@@ -68,11 +68,11 @@ The full walkthrough follows.
 
 ```bash
 git clone <this repo> tp-imap-mcp && cd tp-imap-mcp
-zig build -Doptimize=safe          # optimized, keeps runtime safety checks
-zig build test                     # optional: unit tests (offline)
+zig build -Doptimize=safe --prefix ~/.local   # optimized, keeps runtime safety checks; installs the server
+zig build test                                # optional: unit tests (offline)
 ```
 
-The binary is `zig-out/bin/tp_imap_mcp`. MCP clients launch it by absolute path, so after rebuilding you only need to restart the client.
+`--prefix ~/.local` installs the server as `~/.local/bin/tp_imap_mcp`, outside the repository, so `zig build clean`, `git clean` or a fresh clone never removes the binary your MCP client runs. Without `--prefix` the binary stays in `zig-out/bin/tp_imap_mcp`, which also works if you register that path instead. MCP clients launch it by absolute path, so after reinstalling you only need to restart or reconnect the client.
 
 ### 3. Store credentials in 1Password
 
@@ -158,7 +158,7 @@ op run --env-file imap.env -- zig build itest -- work --organize
 ```bash
 claude mcp add --scope user imap -- \
   op run --env-file "$HOME/.config/tp-imap-mcp/imap.env" -- \
-  /absolute/path/to/tp-imap-mcp/zig-out/bin/tp_imap_mcp
+  "$HOME/.local/bin/tp_imap_mcp"
 
 claude mcp list          # should show "imap" as connected
 ```
@@ -178,7 +178,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
     "imap": {
       "command": "/opt/homebrew/bin/op",
       "args": ["run", "--env-file", "/Users/you/.config/tp-imap-mcp/imap.env", "--",
-               "/absolute/path/to/tp-imap-mcp/zig-out/bin/tp_imap_mcp"]
+               "/Users/you/.local/bin/tp_imap_mcp"]
     }
   }
 }
@@ -195,7 +195,7 @@ The server speaks MCP over **stdio** (newline-delimited JSON-RPC 2.0). Configure
 
 ```
 command: op
-args:    run --env-file /Users/you/.config/tp-imap-mcp/imap.env -- /absolute/path/to/zig-out/bin/tp_imap_mcp
+args:    run --env-file /Users/you/.config/tp-imap-mcp/imap.env -- /Users/you/.local/bin/tp_imap_mcp
 ```
 
 </details>
@@ -243,7 +243,7 @@ npx @modelcontextprotocol/inspector op run --env-file "$PWD/imap.env" -- "$PWD/z
 
 | Task | How |
 |---|---|
-| Update after code changes | `zig build -Doptimize=safe`, then restart / reconnect the client (`/mcp` in Claude Code) |
+| Update after code changes | `zig build -Doptimize=safe --prefix ~/.local`, then restart / reconnect the client (`/mcp` in Claude Code) |
 | Add an account | Add its name to `IMAP_ACCOUNTS` and an `IMAP_<NAME>_*` block; restart the client |
 | Make an account read-only | `IMAP_<NAME>_READONLY=1`; restart |
 | See new folders immediately | Ask the assistant to list mailboxes with refresh, or wait for the TTL (1 h) |
@@ -518,7 +518,7 @@ docs/
 ```bash
 zig build test                                        # unit tests (offline)
 op run --env-file imap.env -- zig build itest -- work # live read-only checks against an account
-zig build clean                                       # remove zig-out and .zig-cache (rebuild before the MCP client restarts)
+zig build clean                                       # remove zig-out and .zig-cache (the ~/.local install is untouched)
 ```
 
 The live checks print only PASS/FAIL lines and use a throwaway cache in `.zig-cache/`.
