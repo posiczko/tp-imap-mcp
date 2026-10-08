@@ -329,7 +329,8 @@ pub const delete_mailbox =
     \\
     \\Notes:
     \\    INBOX, special-use folders and the drafts folder create_message
-    \\    uses cannot be deleted.
+    \\    uses cannot be deleted. On Gmail a folder is a label: deleting it
+    \\    removes the label, and its messages stay in All Mail.
 ;
 
 pub const move_messages =
@@ -342,8 +343,10 @@ pub const move_messages =
     \\    uids: an array of UID strings, or
     \\    criteria: e.g. "FROM \"billing@example.com\" SINCE 1-Jan-2026"
     \\    create_missing: true to create the destination if it does not exist
+    \\        (only when at least one message matches)
     \\    dry_run: with criteria the default is true: nothing is moved and the
-    \\        result shows how many messages match (and the first 100 UIDs).
+    \\        result shows how many messages match (and the first 100 UIDs);
+    \\        its note warns when more match than a real call accepts.
     \\        Show this to the user, then call again with dry_run=false.
     \\        With uids the default is false.
     \\

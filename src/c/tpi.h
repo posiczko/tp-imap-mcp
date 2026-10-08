@@ -93,8 +93,8 @@ int tpi_uid_fetch(tpi_session *s, const uint32_t *uids, size_t uid_count, int wh
                   tpi_fetch_item **out, size_t *count);
 void tpi_fetch_free(tpi_fetch_item *items, size_t count);
 
-/* UID STORE <uids> +FLAGS/-FLAGS (<flags>). Flags are "\\Seen"-style system
- * flags or keyword atoms, already validated. */
+/* UID STORE <uids> +FLAGS.SILENT/-FLAGS.SILENT (<flags>). Flags are
+ * "\\Seen"-style system flags or keyword atoms, already validated. */
 int tpi_uid_store_flags(tpi_session *s, const uint32_t *uids, size_t uid_count, int add,
                         const char *const *flags, size_t flag_count);
 

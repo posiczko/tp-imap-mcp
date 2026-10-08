@@ -248,7 +248,7 @@ const transfer_params = [_]Param{
     .{ .name = "destination", .kind = .string, .description = "Destination mailbox, e.g. \"Receipts/2026\"" },
     .{ .name = "uids", .kind = .string_array, .description = "Message UIDs from search(); pass this or criteria", .required = false },
     .{ .name = "criteria", .kind = .string, .description = "IMAP SEARCH criteria selecting the messages; pass this or uids", .required = false },
-    .{ .name = "create_missing", .kind = .boolean, .description = "true to create the destination if it does not exist (default false)", .required = false },
+    .{ .name = "create_missing", .kind = .boolean, .description = "true to create the destination if it does not exist and something matches (default false)", .required = false },
     .{ .name = "dry_run", .kind = .boolean, .description = "true to only report what would happen; default true with criteria, false with uids", .required = false },
 };
 
@@ -924,7 +924,6 @@ fn transfer(ctx: *Ctx, move: bool) Failure![]const u8 {
     if (!organize.selectable(src_box)) return ctx.failed("\"{s}\" cannot hold messages (\\Noselect)", .{source_shown});
     if (move) if (try organize.moveSourceReason(ctx.arena, src_box)) |r| return ctx.failed("{s}", .{r});
     const dest_box = organize.find(boxes, destination);
-    var note: ?[]const u8 = organize.destinationNote(dest_box);
     if (dest_box) |b| {
         if (!organize.selectable(b)) return ctx.failed("\"{s}\" cannot hold messages (\\Noselect)", .{dest_utf8});
     } else {
@@ -932,7 +931,6 @@ fn transfer(ctx: *Ctx, move: bool) Failure![]const u8 {
         const d = organize.delimiterOf(boxes, destination);
         try ctx.check(validate.mailboxName(dest_utf8, d));
         if (try organize.targetReason(ctx.arena, dest_utf8, destination, null, d)) |r| return ctx.failed("{s}", .{r});
-        if (dry_run) note = "the destination does not exist yet; it will be created";
     }
     const dest_shown = if (dest_box != null) try displayName(ctx.arena, destination) else dest_utf8;
 
@@ -965,6 +963,7 @@ fn transfer(ctx: *Ctx, move: bool) Failure![]const u8 {
         return ctx.failed("{d} messages match; at most {d} per call. Narrow the criteria or split the work.", .{ op.matched.len, organize.max_messages });
     if (op.created) ctx.registry.mailboxesChanged(idx, ctx.arena);
     if (move and op.progress.done > 0) ctx.registry.forgetMoved(idx, source, op.uidvalidity, op.matched[0..op.progress.done]);
+    const note = try organize.transferNote(ctx.arena, organize.destinationNote(dest_box), op.matched.len, dry_run, dest_box == null);
 
     if (dry_run) {
         const preview = op.matched[0..@min(op.matched.len, organize.dry_run_preview)];
@@ -1567,7 +1566,9 @@ const TransferOp = struct {
 
     pub fn run(self: *TransferOp, s: *Session) accounts.Error!void {
         const acting = !self.dry_run;
-        const strategy: organize.MoveStrategy = if (self.move and acting) organize.moveStrategy(try s.capabilities()) else .move;
+        // Checked on dry runs too, so a dry run does not promise a move the
+        // server cannot do.
+        const strategy: organize.MoveStrategy = if (self.move) organize.moveStrategy(try s.capabilities()) else .move;
         if (strategy == .unsupported) {
             self.refused = unsupported_move;
             return;
@@ -1579,7 +1580,7 @@ const TransferOp = struct {
             break :blk found;
         };
         if (!acting or self.matched.len > organize.max_messages) return;
-        if (self.create_destination) {
+        if (self.create_destination and self.matched.len > 0) {
             try s.create(self.destination);
             self.created = true;
             _ = try bestEffort(s.subscribe(self.destination));

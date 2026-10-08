@@ -182,6 +182,7 @@ test "mailboxName accepts folder paths and rejects unsafe names" {
     try testing.expectError(error.MailboxNameInvalid, mailboxName("two\r\nlines", '/'));
     try testing.expectError(error.MailboxNameInvalid, mailboxName("tab\there", '/'));
     try testing.expectError(error.MailboxNameInvalid, mailboxName("nul\x00", '/'));
+    try testing.expectError(error.MailboxNameInvalid, mailboxName("del\x7f", '/'));
     try testing.expectError(error.MailboxNameWildcard, mailboxName("All*", '/'));
     try testing.expectError(error.MailboxNameWildcard, mailboxName("50%", '/'));
     try testing.expectError(error.MailboxNameDelimiter, mailboxName("/Receipts", '/'));

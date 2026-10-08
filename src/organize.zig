@@ -56,10 +56,14 @@ pub fn delimiterOf(boxes: []const imap.Mailbox, wire: []const u8) ?u8 {
     return null;
 }
 
-/// True if `name` lies strictly below `parent` in the hierarchy.
+/// True if `name` lies strictly below `parent` in the hierarchy. INBOX is
+/// case-insensitive, so so is the INBOX prefix of its children.
 pub fn isBelow(name: []const u8, parent: []const u8, delimiter: ?u8) bool {
     const d = delimiter orelse return false;
-    return name.len > parent.len + 1 and std.mem.startsWith(u8, name, parent) and name[parent.len] == d;
+    if (name.len <= parent.len + 1 or name[parent.len] != d) return false;
+    const prefix = name[0..parent.len];
+    if (isInbox(parent)) return isInbox(prefix);
+    return std.mem.eql(u8, prefix, parent);
 }
 
 /// A server folder name for messages: decoded, invisible characters removed.
@@ -96,10 +100,12 @@ pub fn protectedReason(arena: Allocator, boxes: []const imap.Mailbox, wire: []co
 /// Why `target` (UTF-8; `target_wire` encoded) cannot be created or be a
 /// rename target, or null. `source_wire` is the folder being renamed.
 pub fn targetReason(arena: Allocator, target: []const u8, target_wire: []const u8, source_wire: ?[]const u8, delimiter: ?u8) Allocator.Error!?[]const u8 {
+    // Without a known delimiter (no mailboxes listed yet), assume Gmail's.
+    const gmail_delimiter = delimiter orelse '/';
     for (gmail_roots) |root| {
         if (!std.ascii.startsWithIgnoreCase(target, root)) continue;
         const rest = target[root.len..];
-        if (rest.len == 0 or (delimiter != null and rest[0] == delimiter.?))
+        if (rest.len == 0 or rest[0] == gmail_delimiter)
             return try arena.print("\"{s}\" is inside Gmail's system folders; choose a name outside {s}", .{ target, root });
     }
     if (isInbox(target_wire)) return try arena.print("\"{s}\" is reserved for the inbox", .{target});
@@ -137,6 +143,23 @@ pub fn destinationNote(box: ?imap.Mailbox) ?[]const u8 {
         if (std.ascii.eqlIgnoreCase(f, "\\Junk")) return junk_note;
     }
     return null;
+}
+
+fn missingDestinationNote(matched: usize, dry_run: bool) ?[]const u8 {
+    if (matched == 0) return if (dry_run) "nothing matches, so the destination would not be created" else "nothing matched, so the destination was not created";
+    return if (dry_run) "the destination does not exist yet; it will be created" else null;
+}
+
+/// Note for a move/copy result: `dest_note` (Trash/Junk), what happened to a
+/// missing destination (created only when something matched), and a warning
+/// when a dry run matched more than a real call accepts.
+pub fn transferNote(arena: Allocator, dest_note: ?[]const u8, matched: usize, dry_run: bool, dest_missing: bool) Allocator.Error!?[]const u8 {
+    const missing = if (dest_missing) missingDestinationNote(matched, dry_run) else null;
+    const base = missing orelse dest_note;
+    if (!dry_run or matched <= max_messages) return base;
+    const warning = try arena.print("{d} messages match; a real call acts on at most {d} and will be refused. Narrow the criteria or split the work.", .{ matched, max_messages });
+    const extra = base orelse return warning;
+    return try arena.print("{s} {s}", .{ warning, extra });
 }
 
 pub const MoveStrategy = enum {
@@ -358,6 +381,58 @@ test "review: the configured drafts folder and its ancestors are protected" {
     );
     try testing.expect((try protectedReason(a, &boxes, "Mail", "Entw&APw-rfe")) == null);
     try testing.expect((try protectedReason(a, &boxes, "Mail/Drafts", null)) == null);
+}
+
+test "selectable, specialUse, batchCount and expand edge cases" {
+    try testing.expect(!selectable(mbox("Gone", &.{"\\NonExistent"})));
+    try testing.expect(!selectable(mbox("Gone", &.{"\\nonexistent"})));
+    try testing.expectEqualStrings("\\Trash", specialUse(&.{ "\\HasNoChildren", "\\TRASH" }).?);
+    try testing.expect(specialUse(&.{"\\HasNoChildren"}) == null);
+    try testing.expectEqual(0, batchCount(0));
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // A range ending at the largest UID must not overflow.
+    const m = (try uidMap(a, .{ .uidvalidity = 7, .src = &.{.{ 4294967294, 4294967295 }}, .dst = &.{.{ 1, 2 }} })).?;
+    try testing.expectEqual(UidPair{ .from = 4294967295, .to = 2 }, m[1]);
+}
+
+test "isBelow matches INBOX children in any case, other parents exactly" {
+    try testing.expect(isBelow("inbox/Drafts", "INBOX", '/'));
+    try testing.expect(isBelow("INBOX.Sent", "Inbox", '.'));
+    try testing.expect(isBelow("Receipts/2026", "Receipts", '/'));
+    try testing.expect(!isBelow("receipts/2026", "Receipts", '/'));
+    try testing.expect(!isBelow("INBOXES/x", "INBOX", '/'));
+    try testing.expect(!isBelow("INBOX/x", "INBOX", null));
+}
+
+test "targetReason: Gmail system trees are refused without a known delimiter" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try testing.expect((try targetReason(a, "[Gmail]/Mine", "[Gmail]/Mine", null, null)) != null);
+    try testing.expect((try targetReason(a, "[Gmail]", "[Gmail]", null, null)) != null);
+    try testing.expect((try targetReason(a, "[Gmail]Notes", "[Gmail]Notes", null, null)) == null);
+}
+
+test "transferNote: oversized dry runs, empty selections, destination notes" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try testing.expect((try transferNote(a, null, 3, false, false)) == null);
+    try testing.expectEqualStrings(trash_note, (try transferNote(a, trash_note, 3, true, false)).?);
+    try testing.expectEqualStrings("the destination does not exist yet; it will be created", (try transferNote(a, null, 3, true, true)).?);
+    try testing.expectEqualStrings("nothing matches, so the destination would not be created", (try transferNote(a, null, 0, true, true)).?);
+    try testing.expectEqualStrings("nothing matched, so the destination was not created", (try transferNote(a, null, 0, false, true)).?);
+    try testing.expectEqualStrings(
+        "5001 messages match; a real call acts on at most 5000 and will be refused. Narrow the criteria or split the work.",
+        (try transferNote(a, null, 5001, true, false)).?,
+    );
+    try testing.expectEqualStrings(
+        "5001 messages match; a real call acts on at most 5000 and will be refused. Narrow the criteria or split the work. " ++ trash_note,
+        (try transferNote(a, trash_note, 5001, true, false)).?,
+    );
+    try testing.expect((try transferNote(a, null, 5000, true, false)) == null);
 }
 
 test "review: protection messages show server names without invisible characters" {

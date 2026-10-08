@@ -543,8 +543,10 @@ int tpi_uid_store_flags(tpi_session *s, const uint32_t *uids, size_t uid_count, 
       return TPI_ERR_MEMORY;
     }
   }
-  struct mailimap_store_att_flags *sa = add ? mailimap_store_att_flags_new_add_flags(fl)
-                                            : mailimap_store_att_flags_new_remove_flags(fl);
+  /* .SILENT: callers re-fetch flags when they need them, so the per-message
+   * FETCH responses would only cost bandwidth. */
+  struct mailimap_store_att_flags *sa = add ? mailimap_store_att_flags_new_add_flags_silent(fl)
+                                            : mailimap_store_att_flags_new_remove_flags_silent(fl);
   if (sa == NULL) {
     mailimap_flag_list_free(fl);
     return TPI_ERR_MEMORY;

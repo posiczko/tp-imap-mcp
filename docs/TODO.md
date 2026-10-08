@@ -30,12 +30,6 @@
 
 ## Mailbox organization (review, 2026-10-08)
 
-- [ ] **`mailboxName` has no test for DEL (0x7f).**
-- [ ] **A null delimiter lets `[Gmail]/X` through `targetReason`** (accounts
-  with no mailboxes).
-- [ ] **`isBelow` is case-sensitive for INBOX children.**
-- [ ] **Missing `organize` tests:** `\NonExistent`, `specialUse` flag case,
-  `batchCount(0)`, a range ending at u32 max within the cap.
 - [ ] **COPYUID reversed ranges are expanded ascending**; RFC 4315 pairs them
   in copy order.
 - [ ] **`forgetMoved` is not tested with a mismatched uidvalidity**;
@@ -43,13 +37,6 @@
 - [ ] **create/rename/delete don't mark the mailbox list stale after
   `ConnectionLost`.**
 - [ ] **`directory`/`name` are validated only after the fresh LIST.**
-- [ ] **A dry run with more than 5000 matches does not warn** that the real
-  call will be refused.
-- [ ] **A move dry run skips the capability check.**
-- [ ] **The fallback STORE uses `+FLAGS`, not `+FLAGS.SILENT`.**
-- [ ] **`create_missing` creates the destination when 0 messages match.**
-- [ ] **The `delete_mailbox` description lacks the Gmail "removes the label"
-  note.**
 - [ ] **No fake-session seam:** handler paths (fallback move, rename child
   mapping, delete refusal) lack unit tests.
 - [ ] **itest:** `.?` on `uid_map`/`PATH`; refusal checks don't assert the
@@ -69,6 +56,18 @@
 - [ ] **No record of the server's own folder changes.** 26 folders vanished
   outside the MCP and it could not show what it had or had not done. *Fix:*
   log create/rename/delete/move calls (account, name, result) locally.
+
+## Done (2026-10-08 mailbox quick fixes)
+
+- [x] `mailboxName` test covers DEL (0x7f).
+- [x] `targetReason` assumes Gmail's `/` when no delimiter is known, so `[Gmail]/X` is refused.
+- [x] `isBelow` matches INBOX children in any case.
+- [x] `organize` tests: `\NonExistent`, `specialUse` case, `batchCount(0)`, a COPYUID range ending at u32 max.
+- [x] A dry run matching more than 5000 messages warns in its note that the real call will be refused.
+- [x] A move dry run checks MOVE/UIDPLUS and is refused like the real call.
+- [x] STORE uses `+FLAGS.SILENT` / `-FLAGS.SILENT` (callers re-fetch flags).
+- [x] `create_missing` creates the destination only when something matches; the note says so otherwise.
+- [x] `delete_mailbox` description notes that on Gmail it removes the label.
 
 ## Done (2026-10-07 cleanup)
 
