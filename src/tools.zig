@@ -261,7 +261,11 @@ pub const tools = [_]Tool{
         .{ .name = "pattern", .kind = .string, .description = "LIST pattern, e.g. \"*\" or \"Archives%\"" },
         .{ .name = "refresh", .kind = .boolean, .description = "true to bypass the cached mailbox list", .required = false },
     }, .handler = listMailboxes },
-    .{ .name = "mailboxes_status", .description = desc.mailboxes_status, .params = &.{ p_account, p_directory }, .handler = mailboxesStatus },
+    .{ .name = "mailboxes_status", .description = desc.mailboxes_status, .params = &.{
+        p_account,
+        p_directory,
+        .{ .name = "pattern", .kind = .string, .description = "LIST pattern for several folders under directory, e.g. \"*\"; omit for one folder", .required = false },
+    }, .handler = mailboxesStatus },
     .{ .name = "search", .description = desc.search, .params = &.{
         p_account,
         .{ .name = "directory", .kind = .string, .description = "Mailbox to search", .default = "INBOX" },
@@ -449,9 +453,51 @@ fn listMailboxes(ctx: *Ctx) Failure![]const u8 {
 
 fn mailboxesStatus(ctx: *Ctx) Failure![]const u8 {
     const idx = try ctx.account();
+    if (ctx.get("pattern") != null) return foldersStatus(ctx, idx);
     var op: StatusOp = .{ .mailbox = try ctx.mailbox("directory", null) };
     try ctx.imapRun(idx, &op);
     return ctx.json(.{ .MESSAGES = op.result.messages, .RECENT = op.result.recent, .UNSEEN = op.result.unseen });
+}
+
+/// Most folders one mailboxes_status call with a pattern reports; keeps the
+/// result around 16 KB.
+const status_max_folders = 200;
+
+const StatusTarget = struct { path: []const u8, wire: [:0]const u8, selectable: bool };
+const StatusTargets = struct { items: []const StatusTarget, omitted: usize };
+
+/// Folders matching `directory` + `pattern` (LIST semantics, as in
+/// list_mailboxes), sorted by display path; at most `max`, the rest counted.
+fn statusTargets(arena: Allocator, boxes: []const imap.Mailbox, directory: []const u8, pattern: []const u8, max: usize) Allocator.Error!StatusTargets {
+    var out: std.ArrayList(StatusTarget) = .empty;
+    for (boxes) |m| {
+        const path = try displayName(arena, m.name);
+        if (!try listmatch.matches(arena, path, directory, pattern, m.delimiter)) continue;
+        try out.append(arena, .{ .path = path, .wire = try arena.dupeSentinel(u8, m.name, 0), .selectable = organize.selectable(m) });
+    }
+    std.mem.sort(StatusTarget, out.items, {}, struct {
+        fn lessThan(_: void, x: StatusTarget, y: StatusTarget) bool {
+            return std.mem.lessThan(u8, x.path, y.path);
+        }
+    }.lessThan);
+    const n = @min(out.items.len, max);
+    return .{ .items = out.items[0..n], .omitted = out.items.len - n };
+}
+
+/// mailboxes_status with a pattern: STATUS for every matching folder over
+/// one session; a folder the server rejects gets an error, not the call.
+fn foldersStatus(ctx: *Ctx, idx: usize) Failure![]const u8 {
+    const directory = try ctx.string("directory");
+    const pattern = try ctx.string("pattern");
+    try ctx.check(validate.mailbox(directory));
+    try ctx.check(validate.mailbox(pattern));
+    const boxes = try ctx.freshList(idx);
+    const targets = try statusTargets(ctx.arena, boxes, directory, pattern, status_max_folders);
+    var op: StatusManyOp = .{ .arena = ctx.arena, .targets = targets.items };
+    try ctx.imapRun(idx, &op);
+    const note: ?[]const u8 = if (targets.omitted == 0) null else try ctx.arena.print("{d} more folders match; narrow directory or pattern to see them", .{targets.omitted});
+    // Absent fields are left out rather than null: 200 entries stay small.
+    return Stringify.valueAlloc(ctx.arena, .{ .folders = op.result, .omitted = targets.omitted, .note = note }, .{ .emit_null_optional_fields = false });
 }
 
 fn search(ctx: *Ctx) Failure![]const u8 {
@@ -1290,6 +1336,43 @@ const StatusOp = struct {
     }
 };
 
+const FolderStatus = struct {
+    PATH: []const u8,
+    MESSAGES: ?u32 = null,
+    RECENT: ?u32 = null,
+    UNSEEN: ?u32 = null,
+    noselect: ?bool = null,
+    @"error": ?[]const u8 = null,
+};
+
+const StatusManyOp = struct {
+    arena: Allocator,
+    targets: []const StatusTarget,
+    result: []FolderStatus = &.{},
+
+    pub fn run(self: *StatusManyOp, s: *Session) accounts.Error!void {
+        const out = try self.arena.alloc(FolderStatus, self.targets.len);
+        for (self.targets, out) |t, *o| {
+            o.* = .{ .PATH = t.path };
+            if (!t.selectable) {
+                o.noselect = true;
+                continue;
+            }
+            const st = s.status(t.wire) catch |err| switch (err) {
+                error.ServerRejected => {
+                    o.@"error" = try unicode.clean(self.arena, try text.sanitizeUtf8(self.arena, s.lastResponse()));
+                    continue;
+                },
+                else => return err,
+            };
+            o.MESSAGES = st.messages;
+            o.RECENT = st.recent;
+            o.UNSEEN = st.unseen;
+        }
+        self.result = out;
+    }
+};
+
 const SearchOp = struct {
     arena: Allocator,
     mailbox: [:0]const u8,
@@ -1925,6 +2008,35 @@ fn testAccounts() [2]config.Account {
 fn callJson(reg: *Registry, arena: Allocator, name: []const u8, json_args: []const u8) !?Outcome {
     const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, json_args, .{});
     return call(reg, arena, name, v.object);
+}
+
+test "statusTargets: folders matching directory+pattern, sorted by path, capped" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const boxes = [_]imap.Mailbox{
+        .{ .name = "Reading/Tech", .delimiter = '/', .flags = &.{ "\\Noselect", "\\HasChildren" } },
+        .{ .name = "Reading/R&AOk-sum&AOk-s", .delimiter = '/', .flags = &.{} },
+        .{ .name = "Reading", .delimiter = '/', .flags = &.{"\\HasChildren"} },
+        .{ .name = "INBOX", .delimiter = '/', .flags = &.{} },
+        .{ .name = "Readings", .delimiter = '/', .flags = &.{} },
+    };
+    const all = try statusTargets(a, &boxes, "Reading/", "*", 10);
+    try testing.expectEqual(0, all.omitted);
+    try testing.expectEqual(2, all.items.len);
+    try testing.expectEqualStrings("Reading/R\u{e9}sum\u{e9}s", all.items[0].path);
+    try testing.expectEqualStrings("Reading/R&AOk-sum&AOk-s", all.items[0].wire);
+    try testing.expect(all.items[0].selectable);
+    try testing.expectEqualStrings("Reading/Tech", all.items[1].path);
+    try testing.expect(!all.items[1].selectable);
+
+    const capped = try statusTargets(a, &boxes, "", "*", 2);
+    try testing.expectEqual(2, capped.items.len);
+    try testing.expectEqual(3, capped.omitted);
+    try testing.expectEqualStrings("INBOX", capped.items[0].path);
+    try testing.expectEqualStrings("Reading", capped.items[1].path);
+
+    try testing.expectEqual(0, (try statusTargets(a, &boxes, "Nope/", "*", 10)).items.len);
 }
 
 test "offline tools: list_accounts, whoami" {

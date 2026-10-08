@@ -65,13 +65,29 @@ pub const list_mailboxes =
 
 pub const mailboxes_status =
     \\Get the status of a mailbox: the number of messages, recent messages and
-    \\unseen messages.
+    \\unseen messages. With a pattern, get it for every matching folder in one
+    \\call.
     \\
     \\Args:
-    \\    directory: mailbox to get the status of
+    \\    directory: mailbox to get the status of; with a pattern, the base
+    \\               folder as in list_mailboxes ("" for the root)
+    \\    pattern:   optional LIST pattern as in list_mailboxes, e.g. "*" for
+    \\               directory and everything below it, "%" for one level
     \\
     \\Return a status like:
     \\    { "MESSAGES": 41, "RECENT": 0, "UNSEEN": 5 }
+    \\With a pattern, folders sorted by path:
+    \\    { "folders": [
+    \\        {"PATH": "Reading/Food", "MESSAGES": 31, "RECENT": 0, "UNSEEN": 1},
+    \\        {"PATH": "Reading/Tech", "noselect": true},
+    \\        {"PATH": "Old/Gone", "error": "Mailbox doesn't exist"} ],
+    \\      "omitted": 0 }
+    \\
+    \\Notes:
+    \\    At most 200 folders per call; "omitted" counts the rest and "note"
+    \\    says to narrow directory or pattern. A folder the server rejects
+    \\    gets an "error" instead of failing the call. Folders that cannot
+    \\    hold messages are marked "noselect".
 ;
 
 pub const search =

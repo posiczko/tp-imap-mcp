@@ -113,6 +113,10 @@ pub fn main(init: std.process.Init) !u8 {
 
     const st = try h.call("mailboxes_status", "{{\"account\":{s},\"directory\":\"INBOX\"}}", .{acct});
     report(st != null and st.?.object.get("MESSAGES") != null, "mailboxes_status INBOX", .{});
+    const many = try h.call("mailboxes_status", "{{\"account\":{s},\"directory\":\"\",\"pattern\":\"%\"}}", .{acct});
+    const folders = if (many) |m| m.object.get("folders") else null;
+    const n_folders = if (folders) |f| f.array.items.len else 0;
+    report(n_folders > 0, "mailboxes_status pattern \"%\": {d} folders in one call", .{n_folders});
 
     const found = try h.call("search", "{{\"account\":{s},\"directory\":\"INBOX\",\"criteria\":\"ALL\"}}", .{acct});
     const uids = if (found) |f| f.array.items else &.{};

@@ -64,3 +64,18 @@ messages from a folder or remove folders, so a mistake costs more than with
   getting an automatic retry.
 - Gmail semantics differ (folders are labels, All Mail keeps everything); the
   tool descriptions state them, but behavior there is verified manually.
+
+## Amendments (2026-10-08, after a live reorganization of ~700 folders)
+
+- `uid_map` lists at most the first 100 pairs; `uid_map_omitted` counts the
+  rest. A 4,746-message move had returned 134 KB, more than MCP clients
+  accept inline.
+- `create_missing` creates the destination only when something matches; a
+  dry run warns when more than 5000 messages match, and a move dry run checks
+  MOVE/UIDPLUS like the real call.
+- `mailboxes_status` takes an optional LIST `pattern` and reports STATUS for
+  every matching folder over one session (at most 200, sorted by path; the
+  rest counted in `omitted`). A folder the server rejects gets a per-folder
+  `error` instead of failing the call. Auditing 184 folders had taken ~600
+  tool calls. LIST-STATUS (RFC 5819) would need one command, but libetpan
+  has no API for it.
