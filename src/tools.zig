@@ -302,7 +302,7 @@ pub const tools = [_]Tool{
     .{ .name = "organize_mailbox", .description = desc.organize_mailbox, .params = &.{
         p_account,
         .{ .name = "directory", .kind = .string, .description = "Folder to organize", .default = "INBOX" },
-        .{ .name = "limit", .kind = .integer, .description = "Newest messages to return, 1-200 (default 50)", .required = false },
+        .{ .name = "limit", .kind = .integer, .description = "Newest messages to return, 1-200 (default 30)", .required = false },
         .{ .name = "criteria", .kind = .string, .description = "Optional IMAP SEARCH criteria narrowing the candidates, e.g. \"UNSEEN\" or \"SINCE 1-Oct-2026\"", .required = false },
         .{ .name = "include_reviewed", .kind = .boolean, .description = "true to include messages an earlier plan kept or flagged ($TpOrganized)", .required = false },
     }, .handler = organizeMailbox },
@@ -433,7 +433,7 @@ fn listMailboxes(ctx: *Ctx) Failure![]const u8 {
     const refresh = try ctx.booleanOr("refresh", false);
     const all = ctx.registry.mailboxList(idx, ctx.arena, refresh) catch |err| return ctx.imapFailed(err);
 
-    const Entry = struct { PATH: []const u8, DELIMITER: ?[]const u8, FLAGS: []const []const u8 };
+    const Entry = struct { PATH: []const u8, DELIMITER: ?[]const u8, FLAGS: ?[]const []const u8 };
     var out: std.ArrayList(Entry) = .empty;
     for (all) |m| {
         const decoded = mutf7.decode(ctx.arena, m.name) catch |err| switch (err) {
@@ -445,10 +445,25 @@ fn listMailboxes(ctx: *Ctx) Failure![]const u8 {
         try out.append(ctx.arena, .{
             .PATH = path,
             .DELIMITER = if (m.delimiter) |d| try ctx.arena.dupe(u8, &.{d}) else null,
-            .FLAGS = m.flags,
+            .FLAGS = try listedFlags(ctx.arena, m.flags),
         });
     }
-    return ctx.json(out.items);
+    // Absent FLAGS/DELIMITER are left out rather than null: ~600 folders
+    // stay near 30 KB (54 KB before).
+    return Stringify.valueAlloc(ctx.arena, out.items, .{ .emit_null_optional_fields = false });
+}
+
+/// LIST flags worth showing, or null when none are: \HasChildren and
+/// \HasNoChildren follow from the paths, \Marked and \Unmarked help no
+/// decision, and they made up a third of a large list_mailboxes result.
+fn listedFlags(arena: Allocator, flags: []const []const u8) Allocator.Error!?[]const []const u8 {
+    const structural = [_][]const u8{ "\\HasChildren", "\\HasNoChildren", "\\Marked", "\\Unmarked" };
+    var kept: std.ArrayList([]const u8) = .empty;
+    outer: for (flags) |f| {
+        for (structural) |s| if (std.ascii.eqlIgnoreCase(f, s)) continue :outer;
+        try kept.append(arena, f);
+    }
+    return if (kept.items.len == 0) null else kept.items;
 }
 
 fn mailboxesStatus(ctx: *Ctx) Failure![]const u8 {
@@ -2008,6 +2023,19 @@ fn testAccounts() [2]config.Account {
 fn callJson(reg: *Registry, arena: Allocator, name: []const u8, json_args: []const u8) !?Outcome {
     const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, json_args, .{});
     return call(reg, arena, name, v.object);
+}
+
+test "listedFlags drops structural flags and keeps the meaningful ones" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try testing.expect((try listedFlags(a, &.{ "\\HasChildren", "\\Unmarked" })) == null);
+    try testing.expect((try listedFlags(a, &.{ "\\hasnochildren", "\\Marked" })) == null);
+    try testing.expect((try listedFlags(a, &.{})) == null);
+    const kept = (try listedFlags(a, &.{ "\\HasNoChildren", "\\Trash", "\\Noselect", "\\NonExistent", "$Custom" })).?;
+    try testing.expectEqual(4, kept.len);
+    try testing.expectEqualStrings("\\Trash", kept[0]);
+    try testing.expectEqualStrings("$Custom", kept[3]);
 }
 
 test "statusTargets: folders matching directory+pattern, sorted by path, capped" {

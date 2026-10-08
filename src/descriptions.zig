@@ -44,10 +44,13 @@ pub const list_mailboxes =
     \\
     \\Return:
     \\    a list of mailboxes: PATH for the full path, DELIMITER for the path
-    \\    delimiter and FLAGS for the list of the flags of the mailbox.
+    \\    delimiter and FLAGS for the list of the flags of the mailbox. FLAGS
+    \\    (and DELIMITER) are left out when there are none; \HasChildren,
+    \\    \HasNoChildren, \Marked and \Unmarked are never listed (whether a
+    \\    folder has children follows from the paths).
     \\
-    \\    Flags (RFC 6154):
-    \\        \HasNoChildren     mailbox has no child mailbox
+    \\    Flags (RFC 3501, RFC 6154):
+    \\        \Noselect          mailbox cannot hold messages (a parent only)
     \\        \Sent              mailbox is the Sent mailbox
     \\        \Junk              mailbox is the Junk mailbox
     \\        \Drafts            mailbox is the Drafts mailbox
@@ -409,7 +412,7 @@ pub const organize_mailbox =
     \\
     \\Args:
     \\    directory: the folder to organize (default "INBOX")
-    \\    limit: how many of the newest messages, 1-200 (default 50)
+    \\    limit: how many of the newest messages, 1-200 (default 30)
     \\    criteria: optional IMAP SEARCH criteria, e.g. "UNSEEN"
     \\    include_reviewed: true to include messages an earlier plan kept or
     \\        flagged (they carry the keyword $TpOrganized and are skipped

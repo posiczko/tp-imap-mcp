@@ -12,11 +12,11 @@ const text = @import("text.zig");
 pub const max_actions = 500;
 /// Most messages one organize_mailbox call returns.
 pub const max_limit = 200;
-pub const default_limit = 50;
+pub const default_limit = 30;
 /// Bytes of each message fetched for its snippet (BODY.PEEK[]<0.N>).
 pub const partial_bytes = imap.What.partial_bytes;
 /// Characters of sanitized text in a snippet.
-pub const snippet_bytes = 500;
+pub const snippet_bytes = 200;
 /// Largest organize.md accepted.
 pub const instructions_max = 16 * 1024;
 /// Keyword marking messages a plan kept or flagged (spec §2.2).
@@ -419,4 +419,7 @@ test "snippet collapses whitespace and cuts at a UTF-8 boundary" {
     const s = try snippet(a, long.items);
     try testing.expect(s.len <= snippet_bytes);
     try testing.expect(std.unicode.utf8ValidateSlice(s));
+    // Small enough that a default organize_mailbox result fits an MCP client.
+    try testing.expect(snippet_bytes <= 200);
+    try testing.expect(default_limit <= 30);
 }

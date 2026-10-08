@@ -419,7 +419,7 @@ A typical exchange: *"Move all newsletters from news@example.com in INBOX to New
 
 Ask *"organize my inbox"*, or in Claude Code run `/mcp__tp-imap-mcp__organize_my_mailbox` ([ADR 0022](docs/adr/0022-organize-mailbox-two-phase-plan.md)):
 
-1. `organize_mailbox` returns your organizing instructions, your folders and the newest 50 messages (sanitized headers plus a short snippet; messages hidden by a filter show only date and sender).
+1. `organize_mailbox` returns your organizing instructions, your folders and the newest 30 messages (sanitized headers plus a short snippet; messages hidden by a filter show only date and sender).
 2. The assistant classifies each message: **move** to a folder, **delete** (moved to Trash, never erased), **flag** (needs your attention), or **keep**.
 3. `apply_organization` shows the plan grouped by action, as a dry run. Nothing changes.
 4. Only after you confirm does it run again with `execute=true` and the dry run's `plan_hash`. A changed plan needs a new dry run.

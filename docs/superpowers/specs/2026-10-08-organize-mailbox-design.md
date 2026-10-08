@@ -34,7 +34,7 @@ model; the server gathers input, validates the model's plan, and executes it.
 |---|---|---|
 | `account` | — | required |
 | `directory` | `"INBOX"` | folder to organize |
-| `limit` | `50` | 1–200 newest messages |
+| `limit` | `30` | 1–200 newest messages |
 | `criteria` | none | optional IMAP SEARCH criteria narrowing the candidates (validated like `search()`) |
 | `include_reviewed` | `false` | include messages already carrying `$TpOrganized` |
 
@@ -48,7 +48,7 @@ Allowed on read-only accounts. Returns:
  "trash": "Trash",
  "messages": [
    {"uid": "4711", "date": "...", "from": "...", "to": "...", "subject": "...",
-    "size": 18234, "flags": ["\\Seen"], "snippet": "first ~500 characters of text"},
+    "size": 18234, "flags": ["\\Seen"], "snippet": "first ~200 characters of text"},
    {"uid": "4712", "date": "...", "from": "...", "withheld": "password_reset"}
  ],
  "omitted": 0,

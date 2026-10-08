@@ -45,10 +45,6 @@
 
 ## From live use (2026-10-08)
 
-- [ ] **Large results overflow the client.** `list_mailboxes "*"` on ~600
-  folders returned 54 KB and `organize_mailbox` with `limit=50` 57 KB, over
-  what Claude Code accepts inline (the 128 KiB response budget is higher).
-  *Fix:* a smaller budget for these, or terser output. (`uid_map` is done.)
 - [ ] **No record of the server's own folder changes.** 26 folders vanished
   outside the MCP and it could not show what it had or had not done. *Fix:*
   log create/rename/delete/move calls (account, name, result) locally.
@@ -65,6 +61,8 @@
 - [x] `create_missing` creates the destination only when something matches; the note says so otherwise.
 - [x] `delete_mailbox` description notes that on Gmail it removes the label.
 - [x] `mailboxes_status` takes an optional LIST `pattern`: STATUS for up to 200 matching folders in one call (auditing 184 folders had taken ~600 calls).
+- [x] `list_mailboxes` leaves out `\HasChildren`/`\HasNoChildren`/`\Marked`/`\Unmarked` and empty `FLAGS` (596 folders: 54 KB → ~30 KB).
+- [x] `organize_mailbox` snippets are 200 characters and the default `limit` is 30 (57 KB → ~35 KB at the old default).
 - [x] Move/copy results list at most 100 `uid_map` pairs; `uid_map_omitted` counts the rest (a 4,746-message move returned 134 KB).
 
 ## Done (2026-10-07 cleanup)
