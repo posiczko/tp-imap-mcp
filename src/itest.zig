@@ -442,4 +442,62 @@ fn organizeChecks(h: Harness, reg: *Registry, idx: usize, acct: []const u8, io: 
     report(inbox == null, "organize: INBOX cannot be renamed", .{});
     const deleted = try h.call("delete_mailbox", "{{\"account\":{s},\"name\":\"{s}\"}}", .{ acct, ab });
     report(deleted != null, "organize: delete_mailbox removes an empty folder", .{});
+
+    try triageChecks(h, reg, idx, acct, a, &made, rnd);
+}
+
+fn stringField(v: ?std.json.Value, key: []const u8) ?[]const u8 {
+    const o = v orelse return null;
+    if (o != .object) return null;
+    const f = o.object.get(key) orelse return null;
+    return if (f == .string) f.string else null;
+}
+
+fn hasFlags(v: ?std.json.Value, uid: []const u8, wanted: []const []const u8) bool {
+    const o = v orelse return false;
+    if (o != .array or o.array.items.len != 1) return false;
+    const flags = o.array.items[0].object.get(uid) orelse return false;
+    if (flags != .array) return false;
+    for (wanted) |w| {
+        for (flags.array.items) |f| {
+            if (std.mem.eql(u8, f.string, w)) break;
+        } else return false;
+    }
+    return true;
+}
+
+/// ADR 0022 on folder `a`, which holds two test messages: gather, dry run,
+/// refused wrong hash, execute (move, flag, keep), and the $TpOrganized skip.
+/// Creates `<a>-d` as the move destination (cleaned up with the others).
+fn triageChecks(h: Harness, reg: *Registry, idx: usize, acct: []const u8, a: []const u8, made: *std.ArrayList([:0]const u8), rnd: [4]u8) !void {
+    const d = try h.arena.print("{s}-d", .{a});
+    const cd = try h.call("create_mailbox", "{{\"account\":{s},\"name\":\"{s}\"}}", .{ acct, d });
+    if (cd != null) try made.insert(h.arena, 0, try h.arena.dupeSentinel(u8, d, 0));
+    const msg = try h.arena.print("From: itest@example.invalid\r\nTo: itest@example.invalid\r\nSubject: tp-imap-mcp triage itest {x}\r\nDate: Thu, 08 Oct 2026 12:00:00 +0000\r\nMessage-ID: <t{x}@tp-imap-mcp.invalid>\r\n\r\nThird test message; safe to delete.\r\n", .{ rnd, rnd });
+    var append: AppendTo = .{ .mailbox = try h.arena.dupeSentinel(u8, a, 0), .data = msg };
+    reg.run(idx, &append) catch {};
+
+    const gathered = try h.call("organize_mailbox", "{{\"account\":{s},\"directory\":\"{s}\",\"limit\":10}}", .{ acct, a });
+    const msgs = if (gathered) |g| g.object.get("messages").?.array.items else &.{};
+    report(msgs.len == 3 and stringField(gathered, "instructions") != null, "triage: organize_mailbox lists the 3 test messages with instructions", .{});
+    if (msgs.len != 3) return;
+    const uv = gathered.?.object.get("uidvalidity").?.integer;
+    const first = msgs[0].object.get("uid").?.string;
+    const second = msgs[1].object.get("uid").?.string;
+    const third = msgs[2].object.get("uid").?.string;
+    const actions = try h.arena.print("[{{\"uid\":\"{s}\",\"action\":\"move\",\"destination\":\"{s}\"}},{{\"uid\":\"{s}\",\"action\":\"flag\"}},{{\"uid\":\"{s}\",\"action\":\"keep\"}}]", .{ first, d, second, third });
+    const base = "{{\"account\":{s},\"directory\":\"{s}\",\"uidvalidity\":{d},\"actions\":{s}";
+
+    const dry = try h.call("apply_organization", base ++ "}}", .{ acct, a, uv, actions });
+    const hash = stringField(dry, "plan_hash");
+    report(hash != null and (try messagesIn(h, acct, a)) == 3 and (try messagesIn(h, acct, d)) == 0, "triage: dry run returns a plan_hash and changes nothing", .{});
+    if (hash == null) return;
+    const wrong = try h.call("apply_organization", base ++ ",\"execute\":true,\"plan_hash\":\"0000000000000000\"}}", .{ acct, a, uv, actions });
+    report(wrong == null, "triage: execute with a wrong plan_hash is refused", .{});
+    const done = try h.call("apply_organization", base ++ ",\"execute\":true,\"plan_hash\":\"{s}\"}}", .{ acct, a, uv, actions, hash.? });
+    report(intField(done, "flagged") == 1 and intField(done, "kept") == 1 and (try messagesIn(h, acct, a)) == 2 and (try messagesIn(h, acct, d)) == 1, "triage: execute moves one, flags one, keeps one", .{});
+    const kw = try h.call("get_keywords", "{{\"account\":{s},\"directory\":\"{s}\",\"uids\":[\"{s}\"]}}", .{ acct, a, second });
+    report(hasFlags(kw, second, &.{ "\\Flagged", "$TpOrganized" }), "triage: flagged message carries \\Flagged and $TpOrganized", .{});
+    const again = try h.call("organize_mailbox", "{{\"account\":{s},\"directory\":\"{s}\",\"limit\":10}}", .{ acct, a });
+    report(again != null and again.?.object.get("messages").?.array.items.len == 0, "triage: reviewed messages are skipped next time", .{});
 }

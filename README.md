@@ -375,6 +375,8 @@ Every tool except `list_accounts` takes an `account` argument.
 | `rename_mailbox` | Rename a folder or move it under another parent |
 | `delete_mailbox` | Delete an empty folder |
 | `move_messages` / `copy_messages` | Move or copy messages by `uids` or by search `criteria`; criteria default to a dry run |
+| `organize_mailbox` | Gather the organizing instructions, folders and newest messages for the model to classify |
+| `apply_organization` | Preview (dry run) or carry out the model's per-message plan: move, delete (to Trash), flag, keep |
 | `clear_cache` | Delete the account's local cache |
 
 Per-UID results are aligned with the requested UIDs (`null` for UIDs that don't exist). Reading never sets `\Seen`. PGP/MIME messages are not decrypted; a marker is returned instead.
@@ -402,12 +404,34 @@ The folder and move/copy tools ([ADR 0021](docs/adr/0021-mailbox-organization-to
 
 A typical exchange: *"Move all newsletters from news@example.com in INBOX to Newsletters"* → the assistant runs a dry run (`matched: 42`), shows you the count, then repeats the call with `dry_run=false`.
 
+### Organize my mailbox
+
+Ask *"organize my inbox"*, or in Claude Code run `/mcp__tp-imap-mcp__organize_my_mailbox` ([ADR 0022](docs/adr/0022-organize-mailbox-two-phase-plan.md)):
+
+1. `organize_mailbox` returns your organizing instructions, your folders and the newest 50 messages (sanitized headers plus a short snippet; messages hidden by a filter show only date and sender).
+2. The assistant classifies each message: **move** to a folder, **delete** (moved to Trash, never erased), **flag** (needs your attention), or **keep**.
+3. `apply_organization` shows the plan grouped by action, as a dry run. Nothing changes.
+4. Only after you confirm does it run again with `execute=true` and the dry run's `plan_hash`. A changed plan needs a new dry run.
+
+Kept and flagged messages get the keyword `$TpOrganized`, so the next run continues with messages it has not seen. Withheld messages (password resets, codes) are always kept; the server refuses anything else for them.
+
+Write your own instructions in `~/.config/tp-imap-mcp/organize.md`, or `organize.<account>.md` for one account (Markdown, at most 16 KiB, read on every run). Without one, the built-in [default](src/organize_prompt.md) is used. A short example:
+
+```markdown
+# How to organize my mail
+- Receipts and order confirmations go to "Receipts/2026".
+- Newsletters I read: move to "Newsletters". Other marketing: delete.
+- Anything from my accountant or my bank: flag.
+- Never touch password, login or verification emails: keep.
+- When unsure: keep.
+```
+
 ## 🔒 Security model
 
 - **TLS:** the server certificate must chain to the CA bundle and match the configured host; otherwise the connection is refused and no credentials are sent.
 - **Secrets:** only in memory, from the environment `op run` provides; never logged or returned by tools. The server zeroes its own copy on exit; the environment copy lives as long as the process.
 - **Command injection:** search criteria cannot contain CR/LF/NUL; UIDs, keywords, and header names are validated.
-- **Read-only accounts:** write tools refuse before contacting the server (dry runs of `move_messages` / `copy_messages` are allowed).
+- **Read-only accounts:** write tools refuse before contacting the server (dry runs of `move_messages` / `copy_messages` / `apply_organization` are allowed).
 - **Organizing:** see [Organizing mail](#organizing-mail): previews for bulk moves, no plain `EXPUNGE`, protected system folders, and no automatic retry of a folder or move/copy command after a dropped connection.
 - **Cache:** `~/.cache/tp-imap-mcp/<account>.sqlite3`, mode `0600`. It contains message headers (subjects, addresses); delete it any time or set `TP_IMAP_MCP_CACHE=0`.
 - **Sensitive mail:** filtered messages' bodies are never downloaded; their subjects are never shown.
@@ -457,6 +481,8 @@ src/
 ├── mcp.zig             JSON-RPC / MCP stdio loop
 ├── tools.zig           tool handlers (descriptions.zig: model-facing texts)
 ├── organize.zig        folder protection, move strategy, batching (ADR 0021)
+├── triage.zig          organize_mailbox / apply_organization rules (ADR 0022)
+├── organize_prompt.md  built-in organizing instructions
 ├── accounts.zig        per-account sessions, reconnect, cache, drafts discovery
 ├── config.zig          environment → accounts and settings
 ├── validate.zig        argument validation (injection defense)
@@ -502,6 +528,7 @@ CI (`.github/workflows/ci.yml`) runs the unit tests, an optimized build, and a s
 - [x] **OAuth (XOAUTH2)** for Microsoft 365 / Outlook.com and Gmail — [spec](docs/superpowers/specs/2026-10-07-oauth2-design.md) · [ADR 0020](docs/adr/0020-xoauth2-with-refresh-tokens-in-1password.md) · [Gmail runbook](docs/runbooks/gmail-xoauth2.md)
 - [x] Built-in `one_time_codes` filter (2FA codes, sign-in links, verification emails), on by default
 - [x] Mail organization: folders and move/copy — [spec](docs/superpowers/specs/2026-10-08-mailbox-organization-design.md) · [ADR 0021](docs/adr/0021-mailbox-organization-tools.md)
+- [x] Organize my mailbox: model-classified plan with dry run and confirmation — [spec](docs/superpowers/specs/2026-10-08-organize-mailbox-design.md) · [ADR 0022](docs/adr/0022-organize-mailbox-two-phase-plan.md)
 - [ ] Deferred minor issues — see [docs/TODO.md](docs/TODO.md)
 
 ## 🤝 Contributing
