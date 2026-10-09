@@ -670,3 +670,44 @@ test "oauth: invalid_grant tells the user to re-run auth, without the token" {
     try testing.expect(std.mem.find(u8, reg.diag(), "tp_imap_mcp auth ms") != null);
     try testing.expect(std.mem.find(u8, reg.diag(), "RT") == null);
 }
+
+test "forgetMoved drops only rows of the given UIDVALIDITY; a stale generation is left for syncUidvalidity" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try testing.allocator.print(".zig-cache/tmp/{s}", .{&tmp.sub_path});
+    defer testing.allocator.free(dir);
+    const pw = try testing.allocator.dupeSentinel(u8, "x", 0);
+    defer testing.allocator.free(pw);
+    var accounts = [_]config.Account{localAccount(pw, null)};
+    var reg: Registry = try .init(testing.allocator, testing.io, &accounts, .{ .cache_dir = dir, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = config.default_ca_file }, &no_filters_1);
+    defer reg.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const store = reg.cache(0).?;
+    const rows = [_]imap.Fetched{
+        .{ .uid = 1, .size = 10, .data = "h1", .flags = null },
+        .{ .uid = 2, .size = 10, .data = "h2", .flags = null },
+        .{ .uid = 3, .size = 10, .data = "h3", .flags = null },
+    };
+    try store.putMessages("INBOX", 7, &rows);
+
+    // The server reports another UIDVALIDITY (the folder was recreated):
+    // nothing of generation 7 matches, so nothing is deleted.
+    reg.forgetMoved(0, "INBOX", 8, &.{ 1, 2 });
+    try testing.expectEqual(3, (try store.getMessages(a, "INBOX", 7, &.{ 1, 2, 3 })).len);
+    // Another mailbox with the same UIDs is untouched too.
+    reg.forgetMoved(0, "Archive", 7, &.{1});
+    try testing.expectEqual(3, (try store.getMessages(a, "INBOX", 7, &.{ 1, 2, 3 })).len);
+
+    // The matching generation loses exactly the moved UIDs.
+    reg.forgetMoved(0, "INBOX", 7, &.{ 1, 3 });
+    const left = try store.getMessages(a, "INBOX", 7, &.{ 1, 2, 3 });
+    try testing.expectEqual(1, left.len);
+    try testing.expectEqual(2, left[0].uid);
+
+    // Reading under the new UIDVALIDITY drops the stale generation.
+    try store.syncUidvalidity("INBOX", 8);
+    try testing.expectEqual(0, (try store.getMessages(a, "INBOX", 7, &.{2})).len);
+    try testing.expect(reg.slots[0].cache == .open); // no cache error along the way
+}

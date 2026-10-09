@@ -32,7 +32,6 @@
 
 - [ ] **COPYUID reversed ranges are expanded ascending**; RFC 4315 pairs them
   in copy order.
-- [ ] **`forgetMoved` is not tested with a mismatched uidvalidity.**
 - [ ] **`directory`/`name` are validated only after the fresh LIST.**
 - [ ] **itest:** `.?` on `uid_map`/`PATH`; refusal checks don't assert the
   reason; the README PASS count doesn't mention `--organize`.
@@ -50,6 +49,7 @@
 - [x] `create_missing` creates the destination only when something matches; the note says so otherwise.
 - [x] `delete_mailbox` description notes that on Gmail it removes the label.
 - [x] `mailboxes_status` takes an optional LIST `pattern`: STATUS for up to 200 matching folders in one call (auditing 184 folders had taken ~600 calls).
+- [x] `forgetMoved` test: a mismatched UIDVALIDITY or mailbox deletes nothing; the matching generation loses exactly the moved UIDs.
 - [x] A dropped connection during a change that is not retried (create/rename/delete/move/copy) marks the cached folder list stale; `mailboxesChanged`'s success path has a unit test.
 - [x] Fake-session seam: `src/imap/fake.zig` (in-memory IMAP server, test builds only) behind `Session`/`Registry.fake`; handler tests for the COPY+EXPUNGE fallback move, refused moves and dry runs, `create_missing`, rename with subfolders, delete refusal, bulk status.
 - [x] Audit log of every tool call in `~/.local/state/tp-imap-mcp/audit.log` (ADR 0023); 26 folders had vanished and the server could not show what it had done.
