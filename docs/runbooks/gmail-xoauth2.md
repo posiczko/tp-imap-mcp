@@ -73,7 +73,7 @@ Google Auth Platform → **Clients** → **Create client**:
 
 ## 4. Check that IMAP is available
 
-Gmail → ⚙ **See all settings** → **Forwarding and POP/IMAP**: IMAP access
+Gmail → gear icon → **See all settings** → **Forwarding and POP/IMAP**: IMAP access
 should be enabled (Google enables it for all personal accounts). Workspace
 admins can restrict IMAP or third-party OAuth apps in the Admin console; if
 step 6 or 7 fails with an access error, check there.

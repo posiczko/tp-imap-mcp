@@ -1,27 +1,19 @@
-<div align="center">
+# tp-imap-mcp
 
-# 📬 tp-imap-mcp
+An MCP server that lets an AI assistant read, search and organize several IMAP
+mailboxes. TLS is verified, headers are cached locally, sensitive mail is kept
+from the model by filters, and credentials can come from 1Password.
 
-![Zig](https://img.shields.io/badge/Zig-0.17-F7A41D?style=for-the-badge&logo=zig&logoColor=white)
-![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon-000000?style=for-the-badge&logo=apple&logoColor=white)
-![MCP](https://img.shields.io/badge/MCP-stdio-6E56CF?style=for-the-badge)
-![Status](https://img.shields.io/badge/Status-working-2EA043?style=for-the-badge)
-![License](https://img.shields.io/badge/License-MIT-lightgrey?style=for-the-badge)
-
-**An MCP server that lets an AI assistant read and search several IMAP mailboxes — with verified TLS, a local cache, filters that keep sensitive mail out of the model, and optional 1Password credentials.**
-
-[Quick Start](#-quick-start) · [Running](#-running-the-server) · [Configuration](#-configuration) · [1Password](#-keeping-secrets-in-1password-optional) · [Tools](#-tools) · [Troubleshooting](#-troubleshooting) · [Roadmap](#-roadmap)
-
-</div>
+Zig 0.17 · macOS on Apple Silicon · MCP over stdio · MIT license
 
 > [!CAUTION]
-> # ⚠️ TINKERING PROJECT — USE AT YOUR OWN RISK ⚠️
+> # TINKERING PROJECT — USE AT YOUR OWN RISK
 >
 > ## This is a hobby project for learning Zig. It is not a product, not audited, and comes with no support or warranty.
 >
 > ## Prompt injection is real.
 >
-> Every email the assistant reads is text written by **someone else**, and the model cannot reliably tell their instructions from yours. A crafted message can try to make your assistant leak what it has read, or — on a read/write account — flag, file or move your mail, including into Trash. This server's [sanitizing and filters](#-security-model) reduce the risk; **they do not and cannot eliminate it.** Keep accounts read-only (the default) unless you need changes, and review what the assistant does (the [audit log](#7-day-to-day-operation) records every tool call).
+> Every email the assistant reads is text written by **someone else**, and the model cannot reliably tell their instructions from yours. A crafted message can try to make your assistant leak what it has read, or — on a read/write account — flag, file or move your mail, including into Trash. This server's [sanitizing and filters](#security-model) reduce the risk; **they do not and cannot eliminate it.** Keep accounts read-only (the default) unless you need changes, and review what the assistant does (the [audit log](#7-day-to-day-operation) records every tool call).
 >
 > Read before pointing this at a real mailbox:
 > - Simon Willison, [Prompt injection (series)](https://simonwillison.net/series/prompt-injection/)
@@ -29,27 +21,53 @@
 
 ---
 
-## 💡 Concept
+## Contents
 
-> Mirror [vivier/imap-mcp-server](https://github.com/vivier/imap-mcp-server) in Zig, without implementing IMAP yourself, and make it safe to point at more than one real mailbox.
+- [Overview](#overview)
+- [Features](#features)
+- [Quick start](#quick-start)
+- [Running the server](#running-the-server)
+  - [1. Prerequisites](#1-prerequisites)
+  - [2. Build](#2-build)
+  - [3. Write `imap.env`](#3-write-imapenv)
+  - [4. Check the configuration](#4-check-the-configuration)
+  - [5. Register with your MCP client](#5-register-with-your-mcp-client)
+  - [6. Try it](#6-try-it)
+  - [7. Day-to-day operation](#7-day-to-day-operation)
+- [Configuration](#configuration)
+  - [OAuth accounts](#oauth-accounts)
+- [Keeping secrets in 1Password (optional)](#keeping-secrets-in-1password-optional)
+- [Tools](#tools)
+  - [Organizing mail](#organizing-mail)
+  - [Organize my mailbox](#organize-my-mailbox)
+- [Security model](#security-model)
+- [Troubleshooting](#troubleshooting)
+- [Tech stack](#tech-stack)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Overview
+
+The tool set follows [vivier/imap-mcp-server](https://github.com/vivier/imap-mcp-server), reimplemented in Zig on top of libetpan rather than a hand-written IMAP client, with additions for running against several real mailboxes.
 
 tp-imap-mcp exposes IMAP mailboxes to MCP clients (Claude Code, Claude Desktop, …) over stdio. IMAP and MIME come from [libetpan](https://github.com/dinhvh/libetpan); everything else is a small Zig 0.17 codebase. Configuration is environment variables, loaded from a private env file at launch; optionally, `op run` resolves `op://` references from 1Password so secrets never touch disk.
 
-## ✨ Features
+## Features
 
 | Feature | Description |
 |---|---|
-| 📮 Multiple accounts | One server process, an `account` argument on every tool. |
-| 🔐 Credentials | Environment variables from a private (`0600`) env file — or `op://` references resolved by `op run`, keeping secrets in 1Password. |
-| 🛡️ Verified TLS | Certificate chain checked against a CA bundle, SNI set, host name verified **before** the password is sent. |
-| 🗂️ Mail organization | Create, rename/move and delete folders; move or copy messages by UID or by search criteria, with dry runs and protected system folders. |
-| 👀 Read-only by default | Every account refuses the tools that change the mailbox until you set `IMAP_<NAME>_READONLY=0`; reads never mark mail as seen. |
-| ⚡ Local cache | Mailbox list and message headers/sizes cached in SQLite under `~/.cache/tp-imap-mcp/`. |
-| 🔎 Full IMAP search | The model's IMAP `SEARCH` criteria are passed through, with input validation against command injection. |
-| 🙈 Sensitive-content filters | Password-reset and one-time-code emails (and anything you define) are withheld: the model learns they exist, never their content. On by default. |
-| 🧼 Output sanitization | Plain text only; hidden HTML, comments, scripts and invisible Unicode removed; headers decoded; size caps — a defense against prompt injection. |
+| Multiple accounts | One server process, an `account` argument on every tool. |
+| Credentials | Environment variables from a private (`0600`) env file — or `op://` references resolved by `op run`, keeping secrets in 1Password. |
+| Verified TLS | Certificate chain checked against a CA bundle, SNI set, host name verified **before** the password is sent. |
+| Mail organization | Create, rename/move and delete folders; move or copy messages by UID or by search criteria, with dry runs and protected system folders. |
+| Read-only by default | Every account refuses the tools that change the mailbox until you set `IMAP_<NAME>_READONLY=0`; reads never mark mail as seen. |
+| Local cache | Mailbox list and message headers/sizes cached in SQLite under `~/.cache/tp-imap-mcp/`. |
+| Full IMAP search | The model's IMAP `SEARCH` criteria are passed through, with input validation against command injection. |
+| Sensitive-content filters | Password-reset and one-time-code emails (and anything you define) are withheld: the model learns they exist, never their content. On by default. |
+| Output sanitization | Plain text only; hidden HTML, comments, scripts and invisible Unicode removed; headers decoded; size caps — a defense against prompt injection. |
 
-## 🚀 Quick Start
+## Quick start
 
 ```bash
 brew install zig libetpan ca-certificates
@@ -62,11 +80,11 @@ sh -c 'set -a; . ./imap.env; exec zig build itest -- <account>'     # optional l
 claude mcp add --scope user imap -- sh -c 'set -a; . "$HOME/.config/tp-imap-mcp/imap.env"; exec "$HOME/.local/bin/tp_imap_mcp"'
 ```
 
-The server reads its configuration from environment variables; `sh -c 'set -a; . <file>; exec …'` loads them from `imap.env` and starts the command. It works the same from bash, zsh or fish. To keep passwords out of that file, store them in 1Password instead: see [Keeping secrets in 1Password](#-keeping-secrets-in-1password-optional).
+The server reads its configuration from environment variables; `sh -c 'set -a; . <file>; exec …'` loads them from `imap.env` and starts the command. It works the same from bash, zsh or fish. To keep passwords out of that file, store them in 1Password instead: see [Keeping secrets in 1Password](#keeping-secrets-in-1password-optional).
 
 The full walkthrough follows.
 
-## 🏃 Running the server
+## Running the server
 
 ### 1. Prerequisites
 
@@ -77,7 +95,7 @@ The full walkthrough follows.
 | libetpan (IMAP/MIME) | `brew install libetpan` | `pkg-config --modversion libetpan` → `1.10.x` |
 | CA certificates (TLS) | `brew install ca-certificates` | `ls /opt/homebrew/etc/ca-certificates/cert.pem` |
 | SQLite | ships with macOS | — |
-| 1Password CLI *(optional)* | `brew install 1password-cli` | `op --version` — only for [secrets in 1Password](#-keeping-secrets-in-1password-optional) |
+| 1Password CLI *(optional)* | `brew install 1password-cli` | `op --version` — only for [secrets in 1Password](#keeping-secrets-in-1password-optional) |
 
 ### 2. Build
 
@@ -104,7 +122,7 @@ ln -s ~/.config/tp-imap-mcp/imap.env imap.env    # optional: lets the repo comma
 > Why not in the repository? The MCP client starts the server from this file on every launch. In `~/.config` it survives `git clean -fdx`, a fresh clone, or deleting the checkout. A plain `imap.env` in the repository root also works (it is git-ignored); then use that path when registering the server.
 
 > [!WARNING]
-> This file holds your passwords in plain text. Keep it mode `600`, out of backups you share, and out of the repository. If that is not acceptable, put `op://` references in it instead and keep the secrets in 1Password: [Keeping secrets in 1Password](#-keeping-secrets-in-1password-optional).
+> This file holds your passwords in plain text. Keep it mode `600`, out of backups you share, and out of the repository. If that is not acceptable, put `op://` references in it instead and keep the secrets in 1Password: [Keeping secrets in 1Password](#keeping-secrets-in-1password-optional).
 
 The example defines three accounts: a plain IMAP server, Gmail with an app
 password and a Google account with XOAUTH2. Keep only the blocks you use, and
@@ -128,7 +146,7 @@ IMAP_PERSONAL_PASSWORD='app-password-here'
 - Accounts are **read-only by default**: the assistant can read and search, but cannot flag, draft, create folders or move mail until you set `IMAP_<NAME>_READONLY=0` for that account.
 - One `KEY=value` per line, no spaces around `=`. Put a value in **single quotes** if it contains spaces or shell characters such as `$`, `"`, `\`, `#`, `&`, `;`, `|` or a backtick. (`op run` reads the same file and strips the quotes too.)
 - Gmail / Outlook: use an **app password**, or OAuth 2.0 (XOAUTH2) where app passwords are disabled — see [OAuth accounts](#oauth-accounts) and the [Gmail XOAUTH2 runbook](docs/runbooks/gmail-xoauth2.md).
-- See [Configuration](#-configuration) for every variable.
+- See [Configuration](#configuration) for every variable.
 
 ### 4. Check the configuration
 
@@ -247,9 +265,9 @@ npx @modelcontextprotocol/inspector sh -c 'set -a; . ./imap.env; exec ./zig-out/
 | Logs | The server logs to **stderr**; MCP clients usually keep it in their MCP log (Claude Code: `claude --debug`) |
 | See what the MCP did | Every tool call is in `~/.local/state/tp-imap-mcp/audit.log` (JSON Lines), e.g. `grep '"rename_mailbox\|"delete_mailbox' ~/.local/state/tp-imap-mcp/audit.log` |
 
-## ⚙️ Configuration
+## Configuration
 
-All configuration is environment variables, usually loaded from `~/.config/tp-imap-mcp/imap.env` (see [Write `imap.env`](#3-write-imapenv)). Any value may instead be an `op://` reference when you launch through `op run` ([1Password](#-keeping-secrets-in-1password-optional)).
+All configuration is environment variables, usually loaded from `~/.config/tp-imap-mcp/imap.env` (see [Write `imap.env`](#3-write-imapenv)). Any value may instead be an `op://` reference when you launch through `op run` ([1Password](#keeping-secrets-in-1password-optional)).
 
 | Variable | Required | Meaning |
 |---|---|---|
@@ -366,7 +384,7 @@ For Microsoft 365, set `IMAP_<NAME>_HOST=outlook.office365.com`, `IMAP_<NAME>_OA
 
 Access tokens are refreshed automatically and kept only in memory. When a refresh token expires (Microsoft ~90 days; Google apps in *Testing* 7 days), tools report it and tell you to run `auth` again.
 
-## 🔑 Keeping secrets in 1Password (optional)
+## Keeping secrets in 1Password (optional)
 
 Instead of writing passwords and tokens into `imap.env`, write [1Password secret references](https://developer.1password.com/docs/cli/secret-references/) (`op://<vault>/<item>/<field>`) and start every command through `op run`, which resolves them into the environment just before the process starts. The file then holds no secrets, and nothing secret is written to disk.
 
@@ -415,7 +433,7 @@ IMAP_WORK_PASSWORD='op://Private/Work IMAP/password'
 | `error initializing client: authorization timeout` | Approve the 1Password prompt (Touch ID) in time, or unlock 1Password first. |
 | Server fails to start only inside the MCP client | `op` can't unlock non-interactively — see step 1. Use absolute paths for `op` and the binary in GUI clients. |
 
-## 🧰 Tools
+## Tools
 
 Every tool except `list_accounts` takes an `account` argument.
 
@@ -487,10 +505,10 @@ Write your own instructions in `~/.config/tp-imap-mcp/organize.md`, or `organize
 - When unsure: keep.
 ```
 
-## 🔒 Security model
+## Security model
 
 - **TLS:** the server certificate must chain to the CA bundle and match the configured host; otherwise the connection is refused and no credentials are sent.
-- **Secrets:** the server reads them from its environment and never logs or returns them. In `imap.env` they are plain text on disk (mode `0600`); with [1Password references](#-keeping-secrets-in-1password-optional) the file holds none and `op run` passes them only to the process. In memory, the server wipes token buffers and its own copies when done; the environment copy lives as long as the process.
+- **Secrets:** the server reads them from its environment and never logs or returns them. In `imap.env` they are plain text on disk (mode `0600`); with [1Password references](#keeping-secrets-in-1password-optional) the file holds none and `op run` passes them only to the process. In memory, the server wipes token buffers and its own copies when done; the environment copy lives as long as the process.
 - **Command injection:** search criteria cannot contain CR/LF/NUL; UIDs, keywords, and header names are validated.
 - **Read-only accounts:** accounts are read-only unless `IMAP_<NAME>_READONLY=0`; write tools refuse before contacting the server (dry runs of `move_messages` / `copy_messages` / `apply_organization` are allowed).
 - **Organizing:** see [Organizing mail](#organizing-mail): previews for bulk moves, no plain `EXPUNGE`, protected system folders, and no automatic retry of a folder or move/copy command after a dropped connection.
@@ -499,13 +517,13 @@ Write your own instructions in `~/.config/tp-imap-mcp/organize.md`, or `organize
 - **Sensitive mail:** filtered messages' bodies are never downloaded; their subjects are never shown.
 - **Prompt injection:** output is plain text with hidden HTML content and invisible Unicode removed. Text hidden only by CSS colour (white on white) or off-screen positioning is *not* detected.
 
-## 🩺 Troubleshooting
+## Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
 | `imap.env: line N: …: command not found` | A value on line N contains a space or shell character and is not quoted — put it in single quotes. |
 | `imap.env: No such file or directory` | Wrong path in the `sh -c` command; GUI clients need absolute paths (no `~` or `$HOME`). |
-| Server fails to start only inside the MCP client | Use absolute paths for the env file and the binary; with 1Password, see [its troubleshooting](#-keeping-secrets-in-1password-optional). |
+| Server fails to start only inside the MCP client | Use absolute paths for the env file and the binary; with 1Password, see [its troubleshooting](#keeping-secrets-in-1password-optional). |
 | `IMAP_X is missing or empty` / `must be …` | Configuration error; the message names the variable. |
 | `CA bundle … is not readable` | `brew install ca-certificates`, or point `TP_IMAP_MCP_CA_FILE` at a PEM bundle. |
 | `TLS handshake … failed; the certificate is not trusted` | The server's certificate doesn't chain to your CA bundle (self-signed or private CA): add that CA to a bundle and set `TP_IMAP_MCP_CA_FILE`. |
@@ -524,7 +542,7 @@ Write your own instructions in `~/.config/tp-imap-mcp/organize.md`, or `organize
 | An email shows `[withheld by filter "…"]` | Working as intended. Disable for an account with `IMAP_<NAME>_FILTERS=none` (or keep just one, e.g. `IMAP_<NAME>_FILTERS=password_reset` to let the assistant read login codes), or narrow the rules in `filters.zon`. |
 | `… must be a number of bytes >= 1024` | Fix `TP_IMAP_MCP_MAX_BODY_BYTES` / `TP_IMAP_MCP_MAX_RESPONSE_BYTES`. |
 
-## 🛠 Tech Stack
+## Tech stack
 
 | Component | Technology |
 |---|---|
@@ -578,7 +596,7 @@ CI (`.github/workflows/ci.yml`) runs the unit tests, an optimized build, and a s
 
 </details>
 
-## 🗺 Roadmap
+## Roadmap
 
 - [x] All tools of the reference server, multi-account
 - [x] Credentials from environment variables, optionally from 1Password
@@ -594,10 +612,10 @@ CI (`.github/workflows/ci.yml`) runs the unit tests, an optimized build, and a s
 - [x] Organize my mailbox: model-classified plan with dry run and confirmation — [spec](docs/superpowers/specs/2026-10-08-organize-mailbox-design.md) · [ADR 0022](docs/adr/0022-organize-mailbox-two-phase-plan.md)
 - [ ] Deferred minor issues — see [docs/TODO.md](docs/TODO.md)
 
-## 🤝 Contributing
+## Contributing
 
 Decisions are recorded as ADRs in [`docs/adr/`](docs/adr/README.md); significant changes should add one. Work test-first: `zig build test` must stay green.
 
-## 📄 License
+## License
 
 [MIT](LICENSE) — P. Osiczko
