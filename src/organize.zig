@@ -202,6 +202,10 @@ pub const UidPair = struct { from: u32, to: u32 };
 
 /// Expanded UIDs, ascending within each range; null for a "*" end or more
 /// than `max` UIDs (a server cannot make us allocate without bound).
+/// RFC 4315 §3: a range "12:10 is exactly equivalent to 10:12 and refers to
+/// the sequence 10,11,12"; copy order lives in the order of the ranges in
+/// the set ("the source UID set is in the order the message(s) were
+/// copied"), which is kept.
 fn expand(arena: Allocator, ranges: []const [2]u32, max: usize) Allocator.Error!?[]u32 {
     var total: usize = 0;
     for (ranges) |r| {
@@ -365,6 +369,18 @@ test "uidMapPreview lists the first pairs and counts the rest" {
     try testing.expectEqual(uid_map_preview, big.shown.len);
     try testing.expectEqual(1, big.omitted);
     try testing.expectEqual(UidPair{ .from = 1, .to = 1001 }, big.shown[0]);
+}
+
+test "uidMap follows RFC 4315: ranges in listed (copy) order, each range ascending" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // Copied 105 first, then 101 and 102: the set lists them in that order.
+    const m = (try uidMap(a, .{ .uidvalidity = 7, .src = &.{ .{ 105, 105 }, .{ 102, 101 } }, .dst = &.{ .{ 9, 7 } } })).?;
+    try testing.expectEqual(3, m.len);
+    try testing.expectEqual(UidPair{ .from = 105, .to = 7 }, m[0]);
+    try testing.expectEqual(UidPair{ .from = 101, .to = 8 }, m[1]);
+    try testing.expectEqual(UidPair{ .from = 102, .to = 9 }, m[2]);
 }
 
 test "review: sameMailbox treats INBOX case-insensitively and other names exactly" {
