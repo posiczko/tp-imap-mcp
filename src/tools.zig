@@ -152,6 +152,18 @@ const Ctx = struct {
         return ctx.arena.dupeSentinel(u8, wire, 0);
     }
 
+    /// Checks the folder arguments `keys` for what needs no server round
+    /// trip (NUL, UTF-8), so a malformed call is refused before the LIST.
+    /// Missing or non-string values are left to the full parse later.
+    fn precheckMailboxes(ctx: *Ctx, keys: []const []const u8) Failure!void {
+        for (keys) |key| {
+            const v = ctx.get(key) orelse continue;
+            if (v != .string) continue;
+            try ctx.check(validate.mailbox(v.string));
+            if (!std.unicode.utf8ValidateSlice(v.string)) return ctx.invalid("argument \"{s}\" is not valid UTF-8", .{key});
+        }
+    }
+
     /// A folder name to create or rename to (ADR 0021): validated against
     /// the account's hierarchy delimiter; UTF-8 and wire forms.
     fn folderName(ctx: *Ctx, key: []const u8, delimiter: ?u8) Failure!struct { utf8: []const u8, wire: [:0]const u8 } {
@@ -892,6 +904,7 @@ fn renameMailbox(ctx: *Ctx) Failure![]const u8 {
     const idx = try ctx.account();
     try ctx.writable(idx);
     try ctx.check(validate.mailboxName(try ctx.string("new_name"), null));
+    try ctx.precheckMailboxes(&.{"name"});
     const boxes = try ctx.freshList(idx);
     const from = try ctx.mailbox("name", null);
     try ctx.unambiguous(boxes, "name");
@@ -923,6 +936,7 @@ fn renameMailbox(ctx: *Ctx) Failure![]const u8 {
 fn deleteMailbox(ctx: *Ctx) Failure![]const u8 {
     const idx = try ctx.account();
     try ctx.writable(idx);
+    try ctx.precheckMailboxes(&.{"name"});
     const boxes = try ctx.freshList(idx);
     const name = try ctx.mailbox("name", null);
     try ctx.unambiguous(boxes, "name");
@@ -975,6 +989,7 @@ fn transfer(ctx: *Ctx, move: bool) Failure![]const u8 {
     try ctx.check(validate.mailbox(dest_utf8));
     if (!dry_run) try ctx.writable(idx);
 
+    try ctx.precheckMailboxes(&.{"directory"});
     const boxes = try ctx.freshList(idx);
     const source = try ctx.mailbox("directory", null);
     const destination = try ctx.mailbox("destination", null);
@@ -1082,6 +1097,7 @@ fn organizeMailbox(ctx: *Ctx) Failure![]const u8 {
         .problem => |p| return ctx.failed("{s}", .{p}),
     };
 
+    try ctx.precheckMailboxes(&.{"directory"});
     const boxes = try ctx.freshList(idx);
     const mailbox = try ctx.mailbox("directory", "INBOX");
     const shown = try displayName(ctx.arena, mailbox);
@@ -1177,6 +1193,7 @@ fn applyOrganization(ctx: *Ctx) Failure![]const u8 {
     const given_hash = if (execute) try ctx.string("plan_hash") else "";
     if (execute) try ctx.writable(idx);
 
+    try ctx.precheckMailboxes(&.{"directory"});
     const boxes = try ctx.freshList(idx);
     const source = try ctx.mailbox("directory", null);
     const source_shown = try displayName(ctx.arena, source);
@@ -2760,4 +2777,26 @@ test "fake: the cached folder list follows a rename, and goes stale when the con
     h.fake.fail = .{ .command = "DELETE", .err = error.ConnectionLost };
     _ = (try h.call("delete_mailbox", "{\"account\":\"rw\",\"name\":\"Done\"}")).tool_error;
     try testing.expect(h.reg.freshMailboxes(0, a) == null);
+}
+
+test "fake: malformed folder arguments are refused before any LIST" {
+    var h: FakeHarness = undefined;
+    try h.init();
+    defer h.deinit();
+    const calls = [_][2][]const u8{
+        .{ "rename_mailbox", "{\"account\":\"rw\",\"name\":\"Pro\\u0000jects\",\"new_name\":\"X\"}" },
+        .{ "delete_mailbox", "{\"account\":\"rw\",\"name\":\"Old\\u0000\"}" },
+        .{ "move_messages", "{\"account\":\"rw\",\"directory\":\"IN\\u0000BOX\",\"destination\":\"X\",\"uids\":[\"1\"]}" },
+        .{ "copy_messages", "{\"account\":\"rw\",\"directory\":\"IN\\u0000BOX\",\"destination\":\"X\",\"uids\":[\"1\"]}" },
+        .{ "organize_mailbox", "{\"account\":\"rw\",\"directory\":\"IN\\u0000BOX\"}" },
+        .{ "apply_organization", "{\"account\":\"rw\",\"directory\":\"IN\\u0000BOX\",\"uidvalidity\":7,\"actions\":[{\"uid\":\"1\",\"action\":\"keep\"}]}" },
+    };
+    for (calls) |c| {
+        const out = try h.call(c[0], c[1]);
+        if (out != .invalid_params) {
+            std.debug.print("{s} was not refused as invalid params\n", .{c[0]});
+            return error.TestUnexpectedResult;
+        }
+    }
+    try testing.expectEqual(0, h.fake.commands.items.len);
 }
