@@ -37,8 +37,6 @@
 - [ ] **create/rename/delete don't mark the mailbox list stale after
   `ConnectionLost`.**
 - [ ] **`directory`/`name` are validated only after the fresh LIST.**
-- [ ] **No fake-session seam:** handler paths (fallback move, rename child
-  mapping, delete refusal) lack unit tests.
 - [ ] **itest:** `.?` on `uid_map`/`PATH`; refusal checks don't assert the
   reason; the README PASS count doesn't mention `--organize`.
 - [ ] **Gmail manual check pending** (labels, Trash, All Mail).
@@ -55,6 +53,7 @@
 - [x] `create_missing` creates the destination only when something matches; the note says so otherwise.
 - [x] `delete_mailbox` description notes that on Gmail it removes the label.
 - [x] `mailboxes_status` takes an optional LIST `pattern`: STATUS for up to 200 matching folders in one call (auditing 184 folders had taken ~600 calls).
+- [x] Fake-session seam: `src/imap/fake.zig` (in-memory IMAP server, test builds only) behind `Session`/`Registry.fake`; handler tests for the COPY+EXPUNGE fallback move, refused moves and dry runs, `create_missing`, rename with subfolders, delete refusal, bulk status.
 - [x] Audit log of every tool call in `~/.local/state/tp-imap-mcp/audit.log` (ADR 0023); 26 folders had vanished and the server could not show what it had done.
 - [x] `list_mailboxes` leaves out `\HasChildren`/`\HasNoChildren`/`\Marked`/`\Unmarked` and empty `FLAGS` (596 folders: 54 KB → ~30 KB).
 - [x] `organize_mailbox` snippets are 200 characters and the default `limit` is 30 (57 KB → ~35 KB at the old default).

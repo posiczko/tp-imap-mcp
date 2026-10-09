@@ -2,8 +2,13 @@
 //! copied into caller-provided arena memory and the C buffers freed at once.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const c = @import("c.zig");
+
+/// Test seam: in test builds a Session can be backed by an in-memory server
+/// instead of libetpan (src/imap/fake.zig). Production builds have no fake.
+pub const Fake = if (builtin.is_test) @import("fake.zig").Fake else void;
 
 pub const Error = error{
     /// TCP/TLS connection could not be established.
@@ -94,6 +99,13 @@ pub const CopyUid = struct {
 
 pub const Session = struct {
     handle: *c.Session,
+    fake: if (builtin.is_test) ?*Fake else void = if (builtin.is_test) null else {},
+
+    /// A session served by `f` (tests only).
+    pub fn fromFake(f: *Fake) Session {
+        if (comptime !builtin.is_test) @compileError("fake sessions exist only in tests");
+        return .{ .handle = undefined, .fake = f };
+    }
 
     /// Implicit-TLS connect: chain verified against `ca_file`, SNI set, and
     /// the certificate's host name checked before any credential is sent.
@@ -112,6 +124,9 @@ pub const Session = struct {
 
     /// Sends LOGOUT (best effort) and frees the session.
     pub fn close(self: *Session) void {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            _ = f; return;
+        };
         _ = c.tpi_logout(self.handle);
         c.tpi_free(self.handle);
         self.* = undefined;
@@ -119,28 +134,46 @@ pub const Session = struct {
 
     /// Frees without talking to the server (for dead connections).
     pub fn abandon(self: *Session) void {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            _ = f; return;
+        };
         c.tpi_free(self.handle);
         self.* = undefined;
     }
 
     pub fn lastResponse(self: *Session) []const u8 {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            return f.lastResponse();
+        };
         return std.mem.sliceTo(c.tpi_last_response(self.handle), 0);
     }
 
     pub fn login(self: *Session, user: [:0]const u8, password: [:0]const u8) Error!void {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            _ = f; return;
+        };
         try check(c.tpi_login(self.handle, user, password));
     }
 
     pub fn oauth2Login(self: *Session, user: [:0]const u8, access_token: [:0]const u8) Error!void {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            _ = f; return;
+        };
         try check(c.tpi_oauth2_login(self.handle, user, access_token));
     }
 
     pub fn noop(self: *Session) Error!void {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            return f.noop();
+        };
         try check(c.tpi_noop(self.handle));
     }
 
     /// Opens `mailbox` read-only; returns its UIDVALIDITY (0 if unreported).
     pub fn examine(self: *Session, mailbox: [:0]const u8) Error!u32 {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            return f.examine(mailbox);
+        };
         var uv: u32 = 0;
         try check(c.tpi_examine(self.handle, mailbox, &uv));
         return uv;
@@ -148,6 +181,9 @@ pub const Session = struct {
 
     /// Opens `mailbox` read-write; returns its UIDVALIDITY (0 if unreported).
     pub fn select(self: *Session, mailbox: [:0]const u8) Error!u32 {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            return f.select(mailbox);
+        };
         var uv: u32 = 0;
         try check(c.tpi_select(self.handle, mailbox, &uv));
         return uv;
@@ -155,6 +191,9 @@ pub const Session = struct {
 
     /// `criteria` must already be validated (no CR/LF/NUL).
     pub fn uidSearch(self: *Session, arena: Allocator, criteria: [:0]const u8) Error![]u32 {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            return f.uidSearch(arena, criteria);
+        };
         var ptr: ?[*]u32 = null;
         var n: usize = 0;
         try check(c.tpi_uid_search(self.handle, criteria, &ptr, &n));
@@ -164,6 +203,9 @@ pub const Session = struct {
     }
 
     pub fn list(self: *Session, arena: Allocator, reference: [:0]const u8, pattern: [:0]const u8) Error![]Mailbox {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            return f.list(arena, reference, pattern);
+        };
         var ptr: ?[*]c.Mailbox = null;
         var n: usize = 0;
         try check(c.tpi_list(self.handle, reference, pattern, &ptr, &n));
@@ -179,6 +221,9 @@ pub const Session = struct {
     }
 
     pub fn status(self: *Session, mailbox: [:0]const u8) Error!Status {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            return f.status(mailbox);
+        };
         var st: c.Status = undefined;
         try check(c.tpi_status_get(self.handle, mailbox, &st));
         return st;
@@ -186,6 +231,9 @@ pub const Session = struct {
 
     /// Results are in server order and only for UIDs that exist.
     pub fn uidFetch(self: *Session, arena: Allocator, uids: []const u32, what: What) Error![]Fetched {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            return f.uidFetch(arena, uids, what);
+        };
         var ptr: ?[*]c.FetchItem = null;
         var n: usize = 0;
         try check(c.tpi_uid_fetch(self.handle, uids.ptr, uids.len, what.bits(), &ptr, &n));
@@ -203,6 +251,9 @@ pub const Session = struct {
 
     /// `flags` must already be validated.
     pub fn uidStoreFlags(self: *Session, arena: Allocator, uids: []const u32, add: bool, flags: []const []const u8) Error!void {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            return f.uidStoreFlags(arena, uids, add, flags);
+        };
         const zs = try arena.alloc([*:0]const u8, flags.len);
         for (flags, zs) |f, *z| z.* = try arena.dupeSentinel(u8, f, 0);
         try check(c.tpi_uid_store_flags(self.handle, uids.ptr, uids.len, @intFromBool(add), zs.ptr, zs.len));
@@ -210,6 +261,9 @@ pub const Session = struct {
 
     /// Leaf MIME parts per UID from BODYSTRUCTURE (no content downloaded).
     pub fn uidBodyParts(self: *Session, arena: Allocator, uids: []const u32) Error![]BodyPart {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            return f.uidBodyParts(arena, uids);
+        };
         var ptr: ?[*]c.Part = null;
         var n: usize = 0;
         try check(c.tpi_uid_bodystructure(self.handle, uids.ptr, uids.len, &ptr, &n));
@@ -229,31 +283,52 @@ pub const Session = struct {
     }
 
     pub fn append(self: *Session, mailbox: [:0]const u8, data: []const u8) Error!void {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            return f.append(mailbox, data);
+        };
         try check(c.tpi_append(self.handle, mailbox, data.ptr, data.len));
     }
 
     pub fn create(self: *Session, mailbox: [:0]const u8) Error!void {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            return f.create(mailbox);
+        };
         try check(c.tpi_create(self.handle, mailbox));
     }
 
     pub fn rename(self: *Session, from: [:0]const u8, to: [:0]const u8) Error!void {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            return f.rename(from, to);
+        };
         try check(c.tpi_rename(self.handle, from, to));
     }
 
     pub fn delete(self: *Session, mailbox: [:0]const u8) Error!void {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            return f.delete(mailbox);
+        };
         try check(c.tpi_delete(self.handle, mailbox));
     }
 
     pub fn subscribe(self: *Session, mailbox: [:0]const u8) Error!void {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            return f.subscribe(mailbox);
+        };
         try check(c.tpi_subscribe(self.handle, mailbox));
     }
 
     pub fn unsubscribe(self: *Session, mailbox: [:0]const u8) Error!void {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            return f.unsubscribe(mailbox);
+        };
         try check(c.tpi_unsubscribe(self.handle, mailbox));
     }
 
     /// MOVE / UIDPLUS support (one CAPABILITY command per connection).
     pub fn capabilities(self: *Session) Error!Caps {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            return f.capabilities();
+        };
         var mask: c_int = 0;
         try check(c.tpi_capabilities(self.handle, &mask));
         return .{ .move = mask & c.CAP_MOVE != 0, .uidplus = mask & c.CAP_UIDPLUS != 0 };
@@ -262,6 +337,9 @@ pub const Session = struct {
     /// UID MOVE (`move`) or UID COPY from the selected mailbox. Returns the
     /// server's COPYUID data, or null if it sent none.
     pub fn uidTransfer(self: *Session, arena: Allocator, uids: []const u32, mailbox: [:0]const u8, move: bool) Error!?CopyUid {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            return f.uidTransfer(arena, uids, mailbox, move);
+        };
         var out: c.CopyUid = undefined;
         try check(c.tpi_uid_transfer(self.handle, uids.ptr, uids.len, mailbox, @intFromBool(move), &out));
         defer c.tpi_copyuid_free(&out);
@@ -275,6 +353,9 @@ pub const Session = struct {
 
     /// UID EXPUNGE (UIDPLUS) of exactly these UIDs.
     pub fn uidExpunge(self: *Session, uids: []const u32) Error!void {
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            return f.uidExpunge(uids);
+        };
         try check(c.tpi_uid_expunge(self.handle, uids.ptr, uids.len));
     }
 };

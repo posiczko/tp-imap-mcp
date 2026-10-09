@@ -2577,3 +2577,142 @@ test "apply_organization is never retried (gathering may be); its schema lists t
     try testing.expect(std.mem.find(u8, aw.written(), "\"enum\":[\"move\",\"delete\",\"flag\",\"keep\"]") != null);
     try testing.expect(std.mem.find(u8, aw.written(), "\"limit\":{\"type\":\"integer\"") != null);
 }
+
+// ---- handlers against the in-memory IMAP server (src/imap/fake.zig) -------
+
+const FakeHarness = struct {
+    fake: imap.Fake,
+    accts: [2]config.Account,
+    reg: Registry,
+    arena_state: std.heap.ArenaAllocator,
+
+    /// Call `init` on a harness at its final address (the registry points
+    /// into it), then add folders to `h.fake`.
+    fn init(h: *FakeHarness) !void {
+        h.fake = .init(testing.allocator);
+        h.accts = testAccounts();
+        h.reg = try testRegistry(&h.accts);
+        h.reg.fake = &h.fake;
+        h.arena_state = .init(testing.allocator);
+        try h.fake.addBox("INBOX", &.{});
+    }
+
+    fn deinit(h: *FakeHarness) void {
+        h.arena_state.deinit();
+        h.reg.deinit();
+        h.fake.deinit();
+    }
+
+    fn call(h: *FakeHarness, name: []const u8, json_args: []const u8) !Outcome {
+        return (try callJson(&h.reg, h.arena_state.allocator(), name, json_args)).?;
+    }
+
+    fn obj(h: *FakeHarness, out: Outcome) !std.json.ObjectMap {
+        return (try std.json.parseFromSliceLeaky(std.json.Value, h.arena_state.allocator(), out.content, .{})).object;
+    }
+};
+
+test "fake: move uses COPY + STORE \\Deleted + UID EXPUNGE when MOVE is missing" {
+    var h: FakeHarness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.fake.caps = .{ .uidplus = true };
+    try h.fake.addBox("Archive", &.{});
+    try h.fake.addMessages("INBOX", 3);
+    const o = try h.obj(try h.call("move_messages", "{\"account\":\"rw\",\"directory\":\"INBOX\",\"destination\":\"Archive\",\"uids\":[\"1\",\"3\"]}"));
+    try testing.expectEqual(2, o.get("moved").?.integer);
+    try testing.expectEqualSlices(u32, &.{2}, try h.fake.uidsOf("INBOX"));
+    try testing.expectEqualSlices(u32, &.{ 1, 2 }, try h.fake.uidsOf("Archive"));
+    try testing.expect(h.fake.sawCommand("UID COPY 1,3 Archive"));
+    try testing.expect(h.fake.sawCommand("UID STORE 1,3 +FLAGS.SILENT"));
+    try testing.expect(h.fake.sawCommand("UID EXPUNGE 1,3"));
+    try testing.expect(!h.fake.sawCommand("UID MOVE"));
+    try testing.expectEqual(2, o.get("uid_map").?.array.items.len);
+}
+
+test "fake: without MOVE or UIDPLUS a move is refused, its dry run too" {
+    var h: FakeHarness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.fake.caps = .{};
+    try h.fake.addBox("Archive", &.{});
+    try h.fake.addMessages("INBOX", 2);
+    try testing.expectEqualStrings(unsupported_move, (try h.call("move_messages", "{\"account\":\"rw\",\"directory\":\"INBOX\",\"destination\":\"Archive\",\"criteria\":\"ALL\"}")).tool_error);
+    try testing.expectEqualStrings(unsupported_move, (try h.call("move_messages", "{\"account\":\"rw\",\"directory\":\"INBOX\",\"destination\":\"Archive\",\"uids\":[\"1\"]}")).tool_error);
+    // Copying needs neither.
+    const c = try h.obj(try h.call("copy_messages", "{\"account\":\"rw\",\"directory\":\"INBOX\",\"destination\":\"Archive\",\"uids\":[\"1\"]}"));
+    try testing.expectEqual(1, c.get("copied").?.integer);
+}
+
+test "fake: create_missing creates the destination only when something matches" {
+    var h: FakeHarness = undefined;
+    try h.init();
+    defer h.deinit();
+    try h.fake.addMessages("INBOX", 1);
+    const none = try h.obj(try h.call("move_messages", "{\"account\":\"rw\",\"directory\":\"INBOX\",\"destination\":\"New\",\"uids\":[\"99\"],\"create_missing\":true}"));
+    try testing.expectEqual(0, none.get("moved").?.integer);
+    try testing.expectEqualStrings("nothing matched, so the destination was not created", none.get("note").?.string);
+    try testing.expect(h.fake.box("New") == null);
+    try testing.expect(!h.fake.sawCommand("CREATE"));
+
+    const one = try h.obj(try h.call("move_messages", "{\"account\":\"rw\",\"directory\":\"INBOX\",\"destination\":\"New\",\"uids\":[\"1\"],\"create_missing\":true}"));
+    try testing.expectEqual(1, one.get("moved").?.integer);
+    try testing.expect(h.fake.sawCommand("CREATE New"));
+    try testing.expect(h.fake.sawCommand("SUBSCRIBE New"));
+    try testing.expectEqualSlices(u32, &.{1}, try h.fake.uidsOf("New"));
+}
+
+test "fake: rename carries subfolders and their subscriptions" {
+    var h: FakeHarness = undefined;
+    try h.init();
+    defer h.deinit();
+    try h.fake.addBox("Projects", &.{});
+    try h.fake.addBox("Projects/X", &.{});
+    try h.fake.addBox("Projects/X/Y", &.{});
+    try h.fake.addBox("Projectsish", &.{});
+    const o = try h.obj(try h.call("rename_mailbox", "{\"account\":\"rw\",\"name\":\"Projects\",\"new_name\":\"Archive/Projects\"}"));
+    try testing.expectEqualStrings("Archive/Projects", o.get("to").?.string);
+    try testing.expect(h.fake.box("Archive/Projects/X/Y") != null);
+    try testing.expect(h.fake.box("Projectsish") != null); // a name prefix, not a child
+    try testing.expect(h.fake.sawCommand("UNSUBSCRIBE Projects/X/Y"));
+    try testing.expect(h.fake.sawCommand("SUBSCRIBE Archive/Projects/X/Y"));
+    try testing.expect(!h.fake.sawCommand("SUBSCRIBE Archive/Projectsish"));
+}
+
+test "fake: delete refuses folders with messages or subfolders and deletes empty ones" {
+    var h: FakeHarness = undefined;
+    try h.init();
+    defer h.deinit();
+    try h.fake.addBox("Full", &.{});
+    try h.fake.addMessages("Full", 2);
+    try h.fake.addBox("Parent", &.{});
+    try h.fake.addBox("Parent/Child", &.{});
+    try h.fake.addBox("Empty", &.{});
+    try testing.expectEqualStrings("\"Full\" is not empty (2 messages, 0 subfolders); move or delete its contents first", (try h.call("delete_mailbox", "{\"account\":\"rw\",\"name\":\"Full\"}")).tool_error);
+    try testing.expectEqualStrings("\"Parent\" is not empty (0 messages, 1 subfolders); move or delete its contents first", (try h.call("delete_mailbox", "{\"account\":\"rw\",\"name\":\"Parent\"}")).tool_error);
+    try testing.expect(!h.fake.sawCommand("DELETE"));
+    const o = try h.obj(try h.call("delete_mailbox", "{\"account\":\"rw\",\"name\":\"Empty\"}"));
+    try testing.expectEqualStrings("Empty", o.get("deleted").?.string);
+    try testing.expect(h.fake.box("Empty") == null);
+    try testing.expect(h.fake.sawCommand("UNSUBSCRIBE Empty"));
+}
+
+test "fake: mailboxes_status with a pattern reports each folder, a rejected one with its error" {
+    var h: FakeHarness = undefined;
+    try h.init();
+    defer h.deinit();
+    try h.fake.addBox("Reading", &.{"\\Noselect"});
+    try h.fake.addBox("Reading/Tech", &.{});
+    try h.fake.addBox("Reading/Food", &.{});
+    try h.fake.addMessages("Reading/Tech", 3);
+    h.fake.fail = .{ .command = "STATUS Reading/Food", .err = error.ServerRejected, .response = "NO Mailbox doesn't exist" };
+    const o = try h.obj(try h.call("mailboxes_status", "{\"account\":\"rw\",\"directory\":\"Reading\",\"pattern\":\"*\"}"));
+    const folders = o.get("folders").?.array.items;
+    try testing.expectEqual(3, folders.len);
+    try testing.expectEqualStrings("Reading", folders[0].object.get("PATH").?.string);
+    try testing.expect(folders[0].object.get("noselect").?.bool);
+    try testing.expectEqualStrings("NO Mailbox doesn't exist", folders[1].object.get("error").?.string);
+    try testing.expectEqual(3, folders[2].object.get("MESSAGES").?.integer);
+    try testing.expectEqual(3, folders[2].object.get("UNSEEN").?.integer);
+    try testing.expectEqual(0, o.get("omitted").?.integer);
+}

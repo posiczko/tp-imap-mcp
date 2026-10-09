@@ -3,6 +3,7 @@
 //! (spec §5; ADRs 0006, 0013).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const config = @import("config.zig");
 const imap = @import("imap/session.zig");
@@ -35,6 +36,9 @@ pub const Registry = struct {
     /// Active sensitive-content filters per account (ADR 0017), one entry per
     /// account. Required at init so filtering can never be silently off.
     active_filters: []const []const *const Filter,
+    /// Test seam: every account is served by this in-memory IMAP server
+    /// instead of a network connection (tests only; src/imap/fake.zig).
+    fake: if (builtin.is_test) ?*imap.Fake else void = if (builtin.is_test) null else {},
     /// Audit log of tool calls (ADR 0023); null when disabled.
     audit: ?*audit.Log = null,
     /// Human-readable cause of the most recent failure (no secrets).
@@ -204,6 +208,10 @@ pub const Registry = struct {
     /// fails NOOP.
     fn live(self: *Registry, idx: usize) Error!*Session {
         const slot = &self.slots[idx];
+        if (comptime builtin.is_test) if (self.fake) |f| {
+            if (slot.session == null) slot.session = Session.fromFake(f);
+            return &slot.session.?;
+        };
         if (slot.session) |*s| {
             if (s.noop()) |_| return s else |_| self.drop(idx);
         }
