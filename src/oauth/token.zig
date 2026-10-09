@@ -66,6 +66,10 @@ pub fn parseResponse(arena: Allocator, status: u16, body: []const u8) Allocator.
     return .{ .ok = .{ .access_token = at.string, .expires_in = expires_in, .refresh_token = rt } };
 }
 
+/// Largest token endpoint response read; real ones are a few KB. A larger
+/// one fails the request instead of growing memory without bound.
+pub const max_body_bytes = 64 * 1024;
+
 pub const Client = struct {
     gpa: Allocator,
     io: std.Io,
@@ -223,19 +227,23 @@ const Job = struct {
     fn fetch(job: *Job) !void {
         var http = try newHttpClient(job.gpa, job.io, job.ca_file);
         defer http.deinit();
-        var body: std.Io.Writer.Allocating = .init(job.gpa);
-        defer body.deinit();
+        const buf = try job.gpa.alloc(u8, max_body_bytes);
+        defer {
+            std.crypto.secureZero(u8, buf); // holds tokens
+            job.gpa.free(buf);
+        }
+        var body: std.Io.Writer = .fixed(buf);
         const result = try http.fetch(.{
             .location = .{ .url = job.url },
             .method = .POST,
             .payload = job.form,
             .headers = .{ .content_type = .{ .override = "application/x-www-form-urlencoded" } },
             .extra_headers = &.{.{ .name = "accept", .value = "application/json" }},
-            .response_writer = &body.writer,
+            .response_writer = &body,
             .keep_alive = false,
         });
         job.status = @intFromEnum(result.status);
-        job.body = try body.toOwnedSlice();
+        job.body = try job.gpa.dupe(u8, body.buffered());
     }
 };
 
@@ -432,4 +440,30 @@ test "review: a stalled token endpoint times out instead of blocking the server"
     // Let the abandoned worker finish (the server closes at 700 ms) so its
     // allocations are released before the leak check.
     testing.io.sleep(.fromMilliseconds(900), .awake) catch {};
+}
+
+test "a token response over 64 KiB is refused instead of read without bound" {
+    const big_len = max_body_bytes + 1;
+    const head = try testing.allocator.dupe(u8, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ");
+    defer testing.allocator.free(head);
+    var resp: std.ArrayList(u8) = .empty;
+    defer resp.deinit(testing.allocator);
+    try resp.print(testing.allocator, "{s}{d}\r\nConnection: close\r\n\r\n", .{ head, big_len });
+    try resp.appendSlice(testing.allocator, "{\"access_token\":\"AT\",\"pad\":\"");
+    try resp.appendNTimes(testing.allocator, 'x', big_len - "{\"access_token\":\"AT\",\"pad\":\"\"}".len);
+    try resp.appendSlice(testing.allocator, "\"}");
+    var r = try fakeExchange(resp.items, true);
+    defer r.arena.deinit();
+    try testing.expectError(error.TokenRequestFailed, r.result);
+
+    // Exactly at the limit is still fine.
+    var ok_resp: std.ArrayList(u8) = .empty;
+    defer ok_resp.deinit(testing.allocator);
+    try ok_resp.print(testing.allocator, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{max_body_bytes});
+    try ok_resp.appendSlice(testing.allocator, "{\"access_token\":\"AT\",\"pad\":\"");
+    try ok_resp.appendNTimes(testing.allocator, 'x', max_body_bytes - "{\"access_token\":\"AT\",\"pad\":\"\"}".len);
+    try ok_resp.appendSlice(testing.allocator, "\"}");
+    var r2 = try fakeExchange(ok_resp.items, true);
+    defer r2.arena.deinit();
+    try testing.expectEqualStrings("AT", (try r2.result).ok.access_token);
 }

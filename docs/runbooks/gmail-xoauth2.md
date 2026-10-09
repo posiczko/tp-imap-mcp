@@ -104,23 +104,26 @@ IMAP_GMAIL_OAUTH_CLIENT_SECRET=op://Private/Gmail OAuth/client secret
 ## 6. Authorize and obtain the refresh token
 
 ```bash
-op run --env-file imap.env -- tp_imap_mcp auth gmail
+op run --env-file imap.env -- tp_imap_mcp auth gmail | pbcopy
 ```
+
+Only the refresh token goes to stdout (instructions go to the terminal), so
+`| pbcopy` copies it without showing it.
 
 1. Your browser opens Google's consent page (the URL is also printed, in case
    it does not open). Choose the Gmail account you added as a test user.
 2. Google warns **"Google hasn't verified this app"**. This is expected for
    your own Testing app: **Advanced → Go to tp-imap-mcp (unsafe)**.
 3. Grant access to Gmail. The browser shows "Authorization received. You can
-   close this tab."
-4. The terminal prints the **refresh token** on one line, once. Nothing is
-   written to disk.
+   close this tab." (If it shows "Authorization failed", read the terminal.)
+4. The **refresh token** is now on the clipboard (without `| pbcopy` the
+   terminal prints it once). Nothing is written to disk.
 
-Store it, then enable the reference line in `imap.env`:
-
-```bash
-op item edit "Gmail OAuth" --vault Private "refresh token[password]=<THE TOKEN>"
-```
+Store it: in the 1Password app, open the item (e.g. "Gmail OAuth" in
+Private), paste into a password field named `refresh token`, and save. Don't
+put the token on a command line (e.g. `op item edit … field=<token>`): it
+would stay in your shell history and be visible to other processes. Clear
+the clipboard afterwards. Then enable the reference line in `imap.env`:
 
 ```bash
 IMAP_GMAIL_OAUTH_REFRESH_TOKEN=op://Private/Gmail OAuth/refresh token
@@ -153,7 +156,7 @@ picks up the new account.
   `account "gmail": the OAuth refresh token was rejected (expired or revoked);
   run op run --env-file imap.env -- tp_imap_mcp auth gmail and store the new
   token`. Repeat step 6 (comment out the refresh-token line first only if the
-  1Password field was deleted; otherwise just overwrite it with `op item edit`).
+  1Password field was deleted; otherwise just paste the new token over it).
 
 ## Keeping access beyond 7 days
 

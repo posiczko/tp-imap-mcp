@@ -6,12 +6,6 @@
 
 ### From the OAuth review (2026-10-07)
 
-- [ ] **`auth` listener can hang past 5 minutes** if a local client connects
-  and sends nothing (`flow.awaitCallback` reads without a timeout). *Fix:*
-  receive timeout on the accepted socket.
-- [ ] **`error=` aborts the flow without a `state` check**, and a transient
-  `accept` error aborts it too. *Fix:* honor `error=` only with the matching
-  `state`; ignore transient accept errors.
 - [ ] **A rejected access token stays cached** after the final failed login,
   costing an extra login attempt per later call. *Fix:* forget it on the
   second failure.
@@ -19,18 +13,21 @@
   lost) carry no account diagnostic. *Fix:* `setDiag` on every failure path.
 - [ ] **Remaining secret copies are not zeroed** (arena-held parsed token,
   std.http and libetpan buffers). Cosmetic; note or zero what we own.
-- [ ] **Token response bodies are unbounded.** *Fix:* cap at 64 KiB.
-- [ ] **The browser shows "Authorization received" for failures too.** *Fix:*
-  separate failure page.
-- [ ] **The suggested `op item edit … field=<token>` puts the token in shell
-  history and argv.** *Fix:* document a safer entry method.
-- [ ] **PKCE/state use `io.random`**; `io.randomSecure` fails closed. Nit.
 - [ ] **No offline test for the refresh-and-retry login path** (needs a fake
   IMAP server); covered only by the live OAuth check.
 
 ## Mailbox organization (review, 2026-10-08)
 
 - [ ] **Gmail manual check pending** (labels, Trash, All Mail).
+
+## Done (2026-10-08 OAuth hardening)
+
+- [x] The `auth` listener reads each request line with a 10 s poll-based deadline: a client that connects and sends nothing (or stops mid-line) cannot stall the flow.
+- [x] An `error=` redirect counts only with the matching `state`; transient `accept` errors (aborted connection) keep the flow waiting.
+- [x] Token endpoint responses are read into a 64 KiB buffer (zeroed after use); a larger one fails the request.
+- [x] A failed authorization shows "Authorization failed. Return to the terminal" (HTTP 400), not "Authorization received".
+- [x] `auth` and the Gmail runbook no longer suggest `op item edit … field=<token>`; they say to pipe to `pbcopy` and paste into the 1Password app.
+- [x] PKCE verifier and `state` use `io.randomSecure`; `auth` stops if no secure source is available.
 
 ## Done (2026-10-08 mailbox quick fixes)
 

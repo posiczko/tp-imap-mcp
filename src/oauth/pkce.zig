@@ -6,9 +6,11 @@ const Allocator = std.mem.Allocator;
 const b64 = std.base64.url_safe_no_pad.Encoder;
 
 /// base64url of 32 random bytes: 43 characters, as RFC 7636 §4.1 recommends.
-pub fn randomToken(io: std.Io) [43]u8 {
+/// Uses the OS's secure source and fails closed: a predictable verifier or
+/// state would defeat PKCE and the CSRF check.
+pub fn randomToken(io: std.Io) std.Io.RandomSecureError![43]u8 {
     var raw: [32]u8 = undefined;
-    io.random(&raw);
+    try io.randomSecure(&raw);
     var out: [43]u8 = undefined;
     _ = b64.encode(&out, &raw);
     return out;
@@ -31,8 +33,8 @@ test "RFC 7636 Appendix B test vector" {
 }
 
 test "random tokens are 43 url-safe characters and differ" {
-    const a = randomToken(testing.io);
-    const b = randomToken(testing.io);
+    const a = try randomToken(testing.io);
+    const b = try randomToken(testing.io);
     try testing.expect(!std.mem.eql(u8, &a, &b));
     for (a) |ch| try testing.expect(std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_');
 }
