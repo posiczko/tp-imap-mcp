@@ -54,6 +54,13 @@ tpi_session *tpi_new(void) {
 void tpi_free(tpi_session *s) {
   if (s == NULL)
     return;
+  /* mailimap_free sends LOGOUT and waits for the reply while the stream is
+   * open, which blocks on a dead connection. Close it first; callers that
+   * want a polite LOGOUT call tpi_logout before freeing. */
+  if (s->imap->imap_stream != NULL) {
+    mailstream_close(s->imap->imap_stream);
+    s->imap->imap_stream = NULL;
+  }
   mailimap_free(s->imap);
   free(s);
 }

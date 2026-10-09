@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "imap": {
+      "command": "/bin/sh",
+      "args": ["-c", "set -a; . \"$0\"; exec \"$1\"", "@ENV_FILE@", "@BINARY@"]
+    }
+  }
+}

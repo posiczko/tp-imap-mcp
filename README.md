@@ -98,7 +98,7 @@ cp imap.env.example ~/.config/tp-imap-mcp/imap.env    # edit: account names, hos
 chmod 600 ~/.config/tp-imap-mcp/imap.env
 ln -s ~/.config/tp-imap-mcp/imap.env imap.env         # so repo commands can say ./imap.env
 sh -c 'set -a; . ./imap.env; exec zig build itest -- <account>'     # optional live check
-claude mcp add --scope user imap -- sh -c 'set -a; . "$HOME/.config/tp-imap-mcp/imap.env"; exec "$HOME/.local/bin/tp_imap_mcp"'
+zig build install-claude-code -Doptimize=safe          # register with Claude Code (also: install-claude-desktop, install-chatgpt)
 ```
 
 The server reads its configuration from environment variables; `sh -c 'set -a; . <file>; exec …'` loads them from `imap.env` and starts the command. It works the same from bash, zsh or fish. To keep passwords out of that file, store them in 1Password instead: see [Keeping secrets in 1Password](#keeping-secrets-in-1password-optional).
@@ -198,14 +198,42 @@ sh -c 'set -a; . ./imap.env; exec zig build itest -- work --organize'
 
 ### 5. Register with your MCP client
 
-<details open>
-<summary><b>Claude Code</b></summary>
+One build step per client installs the server as `~/.local/bin/tp_imap_mcp` and registers it as `imap` (ADR 0024):
+
+```bash
+zig build install-claude-code    -Doptimize=safe   # Claude Code, user scope (claude mcp add-json)
+zig build install-claude-desktop -Doptimize=safe   # Claude Desktop; restart it afterwards
+zig build install-chatgpt        -Doptimize=safe   # ChatGPT desktop app and Codex CLI ($CODEX_HOME/config.toml)
+
+claude mcp list                                    # Claude Code: should show "imap" as connected
+```
+
+The entry runs a small wrapper that loads `imap.env` before the server starts. The step picks it for you, writing absolute paths everywhere (GUI apps don't inherit your shell's `PATH`):
+
+| `imap.env` contains        | The client runs                                                       |
+|----------------------------|-----------------------------------------------------------------------|
+| no `op://` references      | `/bin/sh -c 'set -a; . "$0"; exec "$1"' <imap.env> <tp_imap_mcp>`     |
+| `op://` references         | `<op> run --env-file <imap.env> -- <tp_imap_mcp>` (1Password CLI)     |
+
+Options: `-Dsecrets=op|envfile` overrides the choice, `-Denv-file=<path>` uses another file (default `~/.config/tp-imap-mcp/imap.env`), `-Dop=<path>` sets the 1Password CLI (default: found on `PATH`). Re-running a step replaces only the `imap` entry; other servers and settings are kept, and the previous file is saved as `<file>.bak`. `zig build uninstall-<client>` removes the entry, `zig build uninstall-local` the binary.
+
+| Client          | Step                     | What it changes                                               | Secrets in 1Password mode                                                      |
+|-----------------|--------------------------|---------------------------------------------------------------|--------------------------------------------------------------------------------|
+| Claude Code     | `install-claude-code`    | `claude mcp add-json --scope user imap …`                     | `op` asks the 1Password app (Touch ID) when a session starts the server        |
+| Claude Desktop  | `install-claude-desktop` | `~/Library/Application Support/Claude/claude_desktop_config.json` | needs the 1Password desktop-app integration (no terminal for a prompt)     |
+| ChatGPT / Codex | `install-chatgpt`        | `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`)    | as Claude Desktop                                                              |
+
+After changing `imap.env` or re-running `tp_imap_mcp auth`, restart or reconnect the client: the server reads its configuration only when it starts.
+
+> [!NOTE]
+> Not yet verified on a real machine: that the ChatGPT desktop app reads `~/.codex/config.toml`, and that `op run` can reach the 1Password app from Claude Desktop and from inside Codex's sandbox. If a client cannot start the server, register it by hand as below.
+
+<details>
+<summary><b>Registering by hand: Claude Code</b></summary>
 
 ```bash
 claude mcp add --scope user imap -- \
   sh -c 'set -a; . "$HOME/.config/tp-imap-mcp/imap.env"; exec "$HOME/.local/bin/tp_imap_mcp"'
-
-claude mcp list          # should show "imap" as connected
 ```
 
 `--scope user` makes it available in every project; use `--scope project` to share it via the repo's `.mcp.json`, or `--scope local` for this directory only.
@@ -213,7 +241,7 @@ claude mcp list          # should show "imap" as connected
 </details>
 
 <details>
-<summary><b>Claude Desktop</b></summary>
+<summary><b>Registering by hand: Claude Desktop</b></summary>
 
 Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
@@ -469,6 +497,7 @@ IMAP_WORK_PASSWORD='op://Private/Work IMAP/password'
 |--------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Check the configuration        | `op run --env-file imap.env -- ./zig-out/bin/tp_imap_mcp </dev/null`                                                                                       |
 | Live checks                    | `op run --env-file imap.env -- zig build itest -- work`                                                                                                    |
+| Register with a client         | `zig build install-claude-code` (or `-claude-desktop`, `-chatgpt`): it sees the `op://` references and registers `op run` with absolute paths             |
 | Register with Claude Code      | `claude mcp add --scope user imap -- op run --env-file "$HOME/.config/tp-imap-mcp/imap.env" -- "$HOME/.local/bin/tp_imap_mcp"`                             |
 | Claude Desktop / other clients | `"command": "/opt/homebrew/bin/op"`, `"args": ["run", "--env-file", "/Users/you/.config/tp-imap-mcp/imap.env", "--", "/Users/you/.local/bin/tp_imap_mcp"]` |
 | OAuth `auth`                   | `op run --env-file imap.env -- ~/.local/bin/tp_imap_mcp auth work \| pbcopy`                                                                               |

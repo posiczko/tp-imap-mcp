@@ -172,7 +172,7 @@ pub fn run(gpa: Allocator, io: std.Io, account: *const config.Account, settings:
     var server = try addr.listen(io, .{});
     defer server.deinit(io);
     const redirect_uri = try arena.print("http://127.0.0.1:{d}/", .{server.socket.address.getPort()});
-    const url = try provider.authorizationUrl(arena, o.provider, ep, o.client_id, redirect_uri, &state, &challenge);
+    const url = try provider.authorizationUrl(arena, o.provider, ep, o.client_id, redirect_uri, &state, &challenge, account.login);
 
     try err.print("Opening your browser to authorize account \"{s}\".\nIf it does not open, visit:\n\n{s}\n\nWaiting up to 5 minutes for the redirect to {s} ...\n", .{ account.name, url, redirect_uri });
     try err.flush();

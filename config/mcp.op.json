@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "imap": {
+      "command": "@OP@",
+      "args": ["run", "--env-file", "@ENV_FILE@", "--", "@BINARY@"]
+    }
+  }
+}

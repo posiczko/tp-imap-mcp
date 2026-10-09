@@ -21,6 +21,8 @@ enum {
 typedef struct tpi_session tpi_session;
 
 tpi_session *tpi_new(void);
+/* Closes the connection without sending anything (no LOGOUT; call tpi_logout
+ * first for that) and frees the session. */
 void tpi_free(tpi_session *s);
 
 /* Implicit TLS connect. The server certificate chain is verified against the

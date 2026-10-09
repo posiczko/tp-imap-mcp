@@ -59,7 +59,8 @@ pub fn encodePairs(arena: Allocator, pairs: []const Pair) Allocator.Error![]cons
     return aw.written();
 }
 
-/// Authorization URL for the code flow with PKCE (spec §4 step 4).
+/// Authorization URL for the code flow with PKCE (spec §4 step 4). An empty
+/// `login_hint` is left out.
 pub fn authorizationUrl(
     arena: Allocator,
     kind: Kind,
@@ -68,6 +69,7 @@ pub fn authorizationUrl(
     redirect_uri: []const u8,
     state: []const u8,
     code_challenge: []const u8,
+    login_hint: []const u8,
 ) Allocator.Error![]const u8 {
     var pairs: std.ArrayList(Pair) = .empty;
     try pairs.appendSlice(arena, &.{
@@ -79,6 +81,10 @@ pub fn authorizationUrl(
         .{ "code_challenge", code_challenge },
         .{ "code_challenge_method", "S256" },
     });
+    // Preselects the account to sign in with (the account's IMAP login), so a
+    // browser already signed in to another account does not authorize that one.
+    // Servers that do not know the parameter must ignore it (RFC 6749 §3.1).
+    if (login_hint.len > 0) try pairs.append(arena, .{ "login_hint", login_hint });
     // Google issues a refresh token only for offline access with consent.
     if (kind == .google) try pairs.appendSlice(arena, &.{ .{ "access_type", "offline" }, .{ "prompt", "consent" } });
     const sep: []const u8 = if (std.mem.findScalar(u8, ep.auth_url, '?') != null) "&" else "?";
@@ -104,15 +110,26 @@ test "authorization URL carries every parameter, percent-encoded" {
     defer arena_state.deinit();
     const a = arena_state.allocator();
     const ep = try endpoints(a, .google, "common", .{ .auth_url = "", .token_url = "", .scope = "" });
-    const url = try authorizationUrl(a, .google, ep, "id 1", "http://127.0.0.1:5555/", "st", "ch");
+    const url = try authorizationUrl(a, .google, ep, "id 1", "http://127.0.0.1:5555/", "st", "ch", "");
     try testing.expectEqualStrings(
         "https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=id%201&redirect_uri=http%3A%2F%2F127.0.0.1%3A5555%2F&scope=https%3A%2F%2Fmail.google.com%2F&state=st&code_challenge=ch&code_challenge_method=S256&access_type=offline&prompt=consent",
         url,
     );
     const ms = try endpoints(a, .microsoft, "common", .{ .auth_url = "", .token_url = "", .scope = "" });
-    const ms_url = try authorizationUrl(a, .microsoft, ms, "c", "r", "s", "x");
+    const ms_url = try authorizationUrl(a, .microsoft, ms, "c", "r", "s", "x", "");
     try testing.expect(std.mem.find(u8, ms_url, "access_type") == null);
     try testing.expect(std.mem.find(u8, ms_url, "scope=https%3A%2F%2Foutlook.office.com%2FIMAP.AccessAsUser.All%20offline_access") != null);
+}
+
+test "authorization URL carries the login hint, percent-encoded" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const none: Endpoints = .{ .auth_url = "", .token_url = "", .scope = "" };
+    const g = try authorizationUrl(a, .google, try endpoints(a, .google, "common", none), "c", "r", "s", "x", "me+imap@example.org");
+    try testing.expect(std.mem.find(u8, g, "&code_challenge_method=S256&login_hint=me%2Bimap%40example.org&access_type=offline&prompt=consent") != null);
+    const ms = try authorizationUrl(a, .microsoft, try endpoints(a, .microsoft, "common", none), "c", "r", "s", "x", "me@example.org");
+    try testing.expect(std.mem.find(u8, ms, "&login_hint=me%40example.org") != null);
 }
 
 test "form encoding" {

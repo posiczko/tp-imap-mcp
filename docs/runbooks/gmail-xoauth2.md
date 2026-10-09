@@ -186,6 +186,31 @@ op run --env-file imap.env -- ~/.local/bin/tp_imap_mcp </dev/null
 op run --env-file imap.env -- zig build itest -- gmail
 ```
 
+## 8. Register with your MCP clients
+
+The token is obtained once, in a terminal; no client is involved. Every client
+then reads it the same way, through the wrapper its entry runs: `op run` when
+`imap.env` holds `op://` references (the token is a 1Password field), the
+`/bin/sh` loader otherwise (the token is in `imap.env`). So the steps are the
+same for every client:
+
+```bash
+zig build install-claude-code    -Doptimize=safe
+zig build install-claude-desktop -Doptimize=safe
+zig build install-chatgpt        -Doptimize=safe   # ChatGPT desktop app and Codex CLI
+```
+
+| Client          | Entry written to                                                     | Picks up a new token after                     |
+|-----------------|----------------------------------------------------------------------|------------------------------------------------|
+| Claude Code     | user scope (`claude mcp list`)                                       | `/mcp` → `imap` → Reconnect, or a new session  |
+| Claude Desktop  | `~/Library/Application Support/Claude/claude_desktop_config.json`    | restarting Claude Desktop                      |
+| ChatGPT / Codex | `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`)           | restarting the app, or a new Codex session     |
+
+In 1Password mode, Claude Desktop and ChatGPT start the server without a
+terminal, so `op` must unlock through the 1Password desktop-app integration
+(README: *Keeping secrets in 1Password*, step 1). Options and details: README,
+*Register with your MCP client*.
+
 ---
 
 ## Day-to-day
@@ -196,7 +221,9 @@ op run --env-file imap.env -- zig build itest -- gmail
   `account "gmail": the OAuth refresh token was rejected (expired or revoked);
   run … tp_imap_mcp auth gmail and store the new token`. Repeat step 6 and
   replace the old token (in `imap.env`, or in the 1Password field; comment out
-  the reference line first only if that field was deleted).
+  the reference line first only if that field was deleted). Then reconnect or
+  restart every client that runs the server (step 8): each reads the token
+  only when the server starts.
 
 ## Keeping access beyond 7 days
 
