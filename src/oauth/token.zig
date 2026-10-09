@@ -3,6 +3,7 @@
 //! diagnostics.
 
 const std = @import("std");
+const wipe = @import("wipe.zig");
 const Allocator = std.mem.Allocator;
 const provider = @import("provider.zig");
 const unicode = @import("../sanitize/unicode.zig");
@@ -181,6 +182,8 @@ pub fn newHttpClient(gpa: Allocator, io: std.Io, ca_file: []const u8) !std.http.
 /// whichever of the two releases it last (the caller may give up on timeout).
 const Job = struct {
     gpa: Allocator,
+    /// For std.http: its TLS and read buffers see the tokens.
+    wiping: wipe.Wiping,
     io: std.Io,
     ca_file: []u8,
     url: []u8,
@@ -194,7 +197,7 @@ const Job = struct {
     fn create(gpa: Allocator, io: std.Io, ca_file: []const u8, url: []const u8, form: []const u8) Allocator.Error!*Job {
         const job = try gpa.create(Job);
         errdefer gpa.destroy(job);
-        job.* = .{ .gpa = gpa, .io = io, .ca_file = undefined, .url = undefined, .form = undefined };
+        job.* = .{ .gpa = gpa, .wiping = .{ .parent = gpa }, .io = io, .ca_file = undefined, .url = undefined, .form = undefined };
         job.ca_file = try gpa.dupe(u8, ca_file);
         errdefer gpa.free(job.ca_file);
         job.url = try gpa.dupe(u8, url);
@@ -225,7 +228,7 @@ const Job = struct {
     }
 
     fn fetch(job: *Job) !void {
-        var http = try newHttpClient(job.gpa, job.io, job.ca_file);
+        var http = try newHttpClient(job.wiping.allocator(), job.io, job.ca_file);
         defer http.deinit();
         const buf = try job.gpa.alloc(u8, max_body_bytes);
         defer {

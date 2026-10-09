@@ -4,10 +4,10 @@
   registration (`http://127.0.0.1`, root path) per spec §9 — Entra may need it
   added via the app manifest (`replyUrlsWithType`).
 
-### From the OAuth review (2026-10-07)
+## Done (2026-10-09 secret copies)
 
-- [ ] **Remaining secret copies are not zeroed** (arena-held parsed token,
-  std.http and libetpan buffers). Cosmetic; note or zero what we own.
+- [x] `oauth/wipe.zig`: `Wiping` allocator wipes memory before freeing it (and the tail on a shrink; relocating remaps refused). Used under the token arena in `Registry.accessToken`, the `auth` flow's arena (code, form, response), and std.http's client in the token job (TLS and read buffers). The PKCE verifier is wiped after use.
+- Not ours to wipe: libetpan's buffers (the AUTHENTICATE line), stdout's buffer in `auth`, and the `op run` environment.
 
 ## Done (2026-10-09 Gmail manual check)
 

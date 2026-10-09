@@ -3,6 +3,7 @@
 //! spec §4). Nothing is written to disk.
 
 const std = @import("std");
+const wipe = @import("wipe.zig");
 const Allocator = std.mem.Allocator;
 const config = @import("../config.zig");
 const pkce = @import("pkce.zig");
@@ -142,7 +143,9 @@ fn readRequestLine(io: std.Io, fd: std.posix.socket_t, buf: []u8, ms: i32) []con
 
 /// Runs the flow for `account`; returns the process exit code.
 pub fn run(gpa: Allocator, io: std.Io, account: *const config.Account, settings: config.Settings, out: *std.Io.Writer, err: *std.Io.Writer) !u8 {
-    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    // Holds the code, verifier and token response: wiped when freed.
+    var wiping: wipe.Wiping = .{ .parent = gpa };
+    var arena_state: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
@@ -154,7 +157,7 @@ pub fn run(gpa: Allocator, io: std.Io, account: *const config.Account, settings:
         },
     };
     const ep = try provider.endpoints(arena, o.provider, o.tenant, o.custom);
-    const verifier, const state = blk: {
+    var verifier, const state = blk: {
         const v = pkce.randomToken(io) catch break :blk null;
         const st = pkce.randomToken(io) catch break :blk null;
         break :blk .{ v, st };
@@ -162,6 +165,7 @@ pub fn run(gpa: Allocator, io: std.Io, account: *const config.Account, settings:
         try err.writeAll("No secure random source is available; cannot start the authorization.\n");
         return 1;
     };
+    defer std.crypto.secureZero(u8, &verifier);
     const challenge = pkce.challenge(&verifier);
 
     var addr = try std.Io.net.IpAddress.parse("127.0.0.1", 0);

@@ -3,6 +3,7 @@
 //! (spec §5; ADRs 0006, 0013).
 
 const std = @import("std");
+const wipe = @import("oauth/wipe.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const config = @import("config.zig");
@@ -114,7 +115,9 @@ pub const Registry = struct {
             };
         }
         self.token_client.?.allow_insecure_loopback = self.allow_insecure_token_loopback;
-        var arena_state: std.heap.ArenaAllocator = .init(self.gpa);
+        // Holds the request form and the response (tokens): wiped when freed.
+        var wiping: wipe.Wiping = .{ .parent = self.gpa };
+        var arena_state: std.heap.ArenaAllocator = .init(wiping.allocator());
         defer arena_state.deinit();
         const arena = arena_state.allocator();
         const ep = try provider.endpoints(arena, o.provider, o.tenant, o.custom);
