@@ -672,9 +672,19 @@ CI (`.github/workflows/ci.yml`) runs the unit tests, an optimized build, and a s
 
 Decisions are recorded as ADRs in [`docs/adr/`](docs/adr/README.md); significant changes should add one. Work test-first: `zig build test` must stay green.
 
+Git hooks guard against leaking credentials. Install them once per clone:
+
+```sh
+brew install prek gitleaks actionlint zizmor
+prek install          # pre-commit and pre-push, per .pre-commit-config.yaml
+prek run --all-files  # optional: check the whole tree now
+```
+
+On commit, [gitleaks](https://github.com/gitleaks/gitleaks) scans the staged diff, private keys and env files such as `imap.env` are refused, and files over 512 KB are flagged. On push, gitleaks scans the whole history, and actionlint and zizmor check the GitHub Actions workflows for mistakes and security problems.
+
 ## Colophon
 
-* Zig, because I'm learning it right now and I wanted to see what Claude will come up with.
+* Zig, because I'm learning it right now and I wanted to see what Claude would come up with.
 * Used Claude Code with [Superpowers plugin](https://github.com/obra/superpowers). I wanted to evaluate a small 
   project against BMAD and Spec Kit.
 * I always use ADRs to keep track of decisions.

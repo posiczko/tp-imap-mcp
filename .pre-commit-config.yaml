@@ -1,0 +1,61 @@
+# Git hooks run by prek (https://prek.j178.dev) or pre-commit; install with
+# `prek install`. Security first: stop credentials and keys from entering
+# history. Tools come from Homebrew (`brew install prek gitleaks actionlint zizmor`).
+# yaml-language-server: $schema=https://json.schemastore.org/pre-commit-config.json
+
+default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # frozen: v6.0.0
+    hooks:
+      - id: detect-private-key
+      - id: check-added-large-files
+        args: [--maxkb=512]
+      - id: check-merge-conflict
+
+  - repo: local
+    hooks:
+      # Secrets in the staged diff (API keys, tokens, private keys, 1Password
+      # service-account tokens, ...). Scans the diff, so pass_filenames is off.
+      - id: gitleaks
+        name: gitleaks (staged changes)
+        entry: gitleaks git --pre-commit --staged --redact --no-banner --verbose
+        language: system
+        pass_filenames: false
+
+      # Defence in depth before anything leaves the machine: the whole history,
+      # so a commit made with --no-verify is still caught.
+      - id: gitleaks-history
+        name: gitleaks (history, before push)
+        entry: gitleaks git --redact --no-banner
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+      # GitHub Actions workflows: correctness (actionlint) and security (zizmor:
+      # unpinned actions, template injection, credential persistence, ...).
+      - id: actionlint
+        name: actionlint (workflows)
+        entry: actionlint
+        language: system
+        files: ^\.github/workflows/.*\.ya?ml$
+        stages: [pre-push]
+
+      - id: zizmor
+        name: zizmor (workflow security)
+        entry: zizmor --offline --min-severity low
+        language: system
+        files: ^\.github/workflows/.*\.ya?ml$
+        stages: [pre-push]
+
+      # imap.env holds account settings and may hold plain passwords; it is
+      # git-ignored, and this also stops `git add -f`. Only the example is tracked.
+      - id: forbid-env-files
+        name: forbid env files (use imap.env.example)
+        entry: env files hold credentials and must not be committed
+        language: fail
+        files: (^|/)([^/]*\.env|\.env[^/]*)$
+        exclude: \.example$
