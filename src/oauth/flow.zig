@@ -224,7 +224,7 @@ pub fn run(gpa: Allocator, io: std.Io, account: *const config.Account, settings:
             try out.flush();
             // Never suggest putting the token on a command line: it would
             // land in shell history and be visible in the process list.
-            try err.print("\nStore it in a 1Password password field by pasting it in the 1Password app; do not pass it on a command line.\nTip: run `... tp_imap_mcp auth {s} | pbcopy` to copy it without showing it.\nThen reference it as IMAP_{s}_OAUTH_REFRESH_TOKEN=op://<vault>/<item>/<field>\n", .{ account.name, try std.ascii.allocUpperString(arena, account.name) });
+            try err.print("\nStore it as IMAP_{s}_OAUTH_REFRESH_TOKEN: paste it into imap.env in an editor, or into a password field in the 1Password app and set the variable to its op://<vault>/<item>/<field> reference. Do not pass it on a command line (shell history, process list).\nTip: run `... tp_imap_mcp auth {s} | pbcopy` to copy it without showing it.\n", .{ try std.ascii.allocUpperString(arena, account.name), account.name });
             return 0;
         },
     }

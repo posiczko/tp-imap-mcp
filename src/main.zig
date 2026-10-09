@@ -73,7 +73,7 @@ pub fn main(init: std.process.Init) !u8 {
 /// `tp_imap_mcp auth <account>` (ADR 0020).
 fn authCommand(init: std.process.Init, arena: std.mem.Allocator, args: []const [:0]const u8, stderr: *std.Io.Writer) !u8 {
     if (args.len != 3) {
-        try stderr.writeAll("usage: op run --env-file imap.env -- tp_imap_mcp auth <account>\n");
+        try stderr.writeAll("usage: tp_imap_mcp auth <account>  (with the account's IMAP_* variables in the environment)\n");
         try stderr.flush();
         return 2;
     }

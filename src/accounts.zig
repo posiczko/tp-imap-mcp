@@ -105,7 +105,7 @@ pub const Registry = struct {
         self.forgetAccessToken(slot);
 
         const rt = o.refresh_token orelse {
-            self.setDiag("account \"{s}\": no OAuth refresh token; run `op run --env-file imap.env -- tp_imap_mcp auth {s}`", .{ a.name, a.name });
+            self.setDiag("account \"{s}\": no OAuth refresh token; run `tp_imap_mcp auth {s}` and store the token as the account's IMAP_<NAME>_OAUTH_REFRESH_TOKEN", .{ a.name, a.name });
             return error.LoginFailed;
         };
         if (self.token_client == null) {
@@ -134,7 +134,7 @@ pub const Registry = struct {
             },
             .failed => |f| {
                 if (std.mem.eql(u8, f.code, "invalid_grant")) {
-                    self.setDiag("account \"{s}\": the OAuth refresh token was rejected (expired or revoked); run `op run --env-file imap.env -- tp_imap_mcp auth {s}` and store the new token", .{ a.name, a.name });
+                    self.setDiag("account \"{s}\": the OAuth refresh token was rejected (expired or revoked); run `tp_imap_mcp auth {s}` and store the new token", .{ a.name, a.name });
                 } else {
                     self.setDiag("account \"{s}\": OAuth token request failed: {s}{s}{s}", .{ a.name, f.code, if (f.description.len > 0) ": " else "", f.description });
                 }

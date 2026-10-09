@@ -47,3 +47,18 @@ Questions decided:
 - More code: a minimal HTTP listener and a token client, both with no new
   dependency.
 - Token values join passwords in the "never logged or returned" rule.
+
+## Amendment (2026-10-09): 1Password optional
+
+The client ID/secret and refresh token are ordinary environment variables
+(ADR 0007, amended the same day). The documented default is now plain values
+in a mode-`0600` `imap.env` loaded with `sh -c 'set -a; . imap.env; exec …'`;
+1Password references resolved by `op run` remain the documented alternative.
+
+- `auth` tells the user to store the token as `IMAP_<NAME>_OAUTH_REFRESH_TOKEN`
+  in `imap.env` or in a 1Password field, never on a command line. Error
+  messages say `tp_imap_mcp auth <account>` without assuming `op run`.
+- With plain values, the refresh token and client secret sit on disk in that
+  file; the consequence "secrets never touch disk" holds only with 1Password.
+- Unchanged: rotated refresh tokens are ignored, and the server never writes
+  credentials anywhere (neither to `imap.env` nor to a vault).

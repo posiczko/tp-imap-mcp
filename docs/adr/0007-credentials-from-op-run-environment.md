@@ -33,3 +33,15 @@ variable, never its value. Passwords are zeroed on shutdown and never logged.
   inherent to environment injection.
 - Non-secret settings could later move to `$XDG_CONFIG_HOME` (see ADR 0014)
   without changing how secrets are supplied.
+
+## Amendment (2026-10-09): `op run` optional
+
+Configuration is still environment variables only, but they no longer have to
+come from `op run`. The documented default loads a plain `imap.env` (mode
+`0600`, values single-quoted where needed) with
+`sh -c 'set -a; . imap.env; exec tp_imap_mcp'`; `op run --env-file imap.env`
+with `op://` references is the documented alternative for keeping secrets off
+disk. The same file works for both (`op run` strips the quotes and resolves
+quoted references). With plain values, "no secrets in files" no longer holds:
+the file is private to the user, not secret-free. The server itself is
+unchanged: it never reads a file for credentials.

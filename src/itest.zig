@@ -1,6 +1,7 @@
 //! Live integration checks against a real IMAP account (spec §9).
 //!
-//!   op run --env-file imap.env -- zig build itest -- <account> [--write <scratch-mailbox>] [--organize]
+//!   sh -c 'set -a; . ./imap.env; exec zig build itest -- <account> [--write <scratch-mailbox>] [--organize]'
+//!   (with 1Password: op run --env-file imap.env -- zig build itest -- <account> …)
 //!
 //! Read-only by default. Prints only counts and shapes, never message content.
 //! Uses a throwaway cache in .zig-cache/itest-cache, never ~/.cache.
