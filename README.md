@@ -44,6 +44,7 @@ Zig 0.17 · macOS (Apple Silicon) and Linux (Ubuntu) · MCP over stdio · MIT li
   - [6. Try it](#6-try-it)
   - [7. Day-to-day operation](#7-day-to-day-operation)
 - [Configuration](#configuration)
+  - [Gmail app passwords](#gmail-app-passwords)
   - [OAuth accounts](#oauth-accounts)
 - [Keeping secrets in 1Password (optional)](#keeping-secrets-in-1password-optional)
 - [Tools](#tools)
@@ -169,7 +170,7 @@ IMAP_PERSONAL_PASSWORD='app-password-here'
 - One `IMAP_<NAME>_*` block per name in `IMAP_ACCOUNTS`; `<NAME>` is upper-cased.
 - Accounts are **read-only by default**: the assistant can read and search, but cannot flag, draft, create folders or move mail until you set `IMAP_<NAME>_READONLY=0` for that account.
 - One `KEY=value` per line, no spaces around `=`. Put a value in **single quotes** if it contains spaces or shell characters such as `$`, `"`, `\`, `#`, `&`, `;`, `|` or a backtick. (`op run` reads the same file and strips the quotes too.)
-- Gmail / Outlook: use an **app password**, or OAuth 2.0 (XOAUTH2) where app passwords are disabled — see [OAuth accounts](#oauth-accounts) and the [Gmail XOAUTH2 runbook](docs/runbooks/gmail-xoauth2.md).
+- Gmail / Outlook: use an **app password** ([Gmail app passwords](#gmail-app-passwords)), or OAuth 2.0 (XOAUTH2) where app passwords are disabled — see [OAuth accounts](#oauth-accounts) and the [Gmail XOAUTH2 runbook](docs/runbooks/gmail-xoauth2.md).
 - See [Configuration](#configuration) for every variable.
 
 ### 4. Check the configuration
@@ -369,6 +370,27 @@ IMAP_WORK_PASSWORD='correct horse battery staple'
 - Any error in the file (syntax, unknown key, bad regex) stops startup with the file, filter, rule and condition named. Restart after editing.
 
 </details>
+
+### Gmail app passwords
+
+Gmail no longer accepts your normal Google password over IMAP. Without OAuth, the alternative is an **app password**: a 16-character password that only works for this one client. The server logs in with it like any other password (`AUTH=password`, the default).
+
+1. Turn on [2-Step Verification](https://myaccount.google.com/signinoptions/two-step-verification) for the Google account.
+2. Make sure IMAP is enabled in Gmail: **Settings → See all settings → Forwarding and POP/IMAP**.
+3. Create the password at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords). Give it a name like `tp-imap-mcp`. Google shows it only once.
+4. Put it in `imap.env` as `IMAP_<NAME>_PASSWORD`. Quote it, since Google displays it with spaces. Better still, store it in 1Password and reference it with `op://`.
+
+```bash
+IMAP_GMAIL_HOST=imap.gmail.com
+IMAP_GMAIL_LOGIN=you@gmail.com
+IMAP_GMAIL_PASSWORD='abcd efgh ijkl mnop'
+IMAP_GMAIL_DRAFTS=[Gmail]/Drafts
+```
+
+> [!IMPORTANT]
+> Changing your main Google password revokes all app passwords. If that happens, create a new one; until then, logins fail with `login failed`. An app password gives full access to the mailbox and can't be limited, so treat it like your main password. Revoke it on the same page when you no longer need it.
+
+App passwords aren't always available. They're blocked under the Advanced Protection Program, may not be offered on accounts that use only security keys for 2-Step Verification, and Google Workspace admins can turn them off. In those cases, use [OAuth](#oauth-accounts).
 
 ### OAuth accounts
 
