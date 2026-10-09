@@ -22,6 +22,10 @@ Zig 0.17 · macOS (Apple Silicon) and Linux (Ubuntu) · MCP over stdio · MIT li
 > Read before pointing this at a real mailbox:
 > - Simon Willison, [Prompt injection (series)](https://simonwillison.net/series/prompt-injection/)
 > - Liu et al., [Prompt Injection attack against LLM-integrated Applications](https://arxiv.org/html/2306.05499v3) (arXiv 2306.05499)
+>
+> ## Turn it off when you are done.
+>
+> Once registered, the server starts with every session of your MCP client and stays running, with its tools available to the assistant — and open to prompt injection from any email it reads — until you turn it off. When you have finished with your mail, turn it off: in Claude Code, `/mcp`, pick `imap`, **Disable**. See [Day-to-day operation](#7-day-to-day-operation).
 
 ---
 
@@ -97,6 +101,8 @@ claude mcp add --scope user imap -- sh -c 'set -a; . "$HOME/.config/tp-imap-mcp/
 ```
 
 The server reads its configuration from environment variables; `sh -c 'set -a; . <file>; exec …'` loads them from `imap.env` and starts the command. It works the same from bash, zsh or fish. To keep passwords out of that file, store them in 1Password instead: see [Keeping secrets in 1Password](#keeping-secrets-in-1password-optional).
+
+When you have finished, turn the server off (`/mcp` in Claude Code, pick `imap`, **Disable**); otherwise it keeps running in every session.
 
 The full walkthrough follows.
 
@@ -271,12 +277,16 @@ npx @modelcontextprotocol/inspector sh -c 'set -a; . ./imap.env; exec ./zig-out/
 
 ### 7. Day-to-day operation
 
+Once registered, the server starts with every session of your MCP client and stays running, with its tools available to the assistant, until you turn it off. When you have finished with your mail, turn it off (see "Turn the server off" below) and turn it back on next time you need it.
+
 | Task                        | How                                                                                                                                                            |
 |-----------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Update after code changes   | `zig build -Doptimize=safe --prefix ~/.local`, then restart / reconnect the client (`/mcp` in Claude Code)                                                     |
 | Add an account              | Add its name to `IMAP_ACCOUNTS` and an `IMAP_<NAME>_*` block; restart the client                                                                               |
 | Change a password           | Edit `imap.env` (or the 1Password item); restart the client                                                                                                    |
 | Allow changes on an account | `IMAP_<NAME>_READONLY=0` (read-only is the default); restart                                                                                                   |
+| Turn the server off         | Claude Code: `/mcp`, pick `imap`, **Disable** (**Enable** to turn it back on). Claude Desktop: remove the `imap` entry; restart                                |
+| Remove the server           | `claude mcp remove imap --scope user` (the scope it was added with); re-add with the command in step 5                                                         |
 | See new folders immediately | Ask the assistant to list mailboxes with refresh, or wait for the TTL (1 h)                                                                                    |
 | Clear cached data           | Ask the assistant to clear the cache, or `rm ~/.cache/tp-imap-mcp/<account>.sqlite3*`                                                                          |
 | Disable the cache           | `TP_IMAP_MCP_CACHE=0`                                                                                                                                          |
