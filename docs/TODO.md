@@ -9,9 +9,12 @@
 - [ ] **Remaining secret copies are not zeroed** (arena-held parsed token,
   std.http and libetpan buffers). Cosmetic; note or zero what we own.
 
-## Mailbox organization (review, 2026-10-08)
+## Done (2026-10-09 Gmail manual check)
 
-- [ ] **Gmail manual check pending** (labels, Trash, All Mail).
+- [x] Live on Gmail: special-use flags listed (`\All`, `\Trash`, `\Junk`, `\Important`, …); deleting `[Gmail]`, creating under `[Gmail]/`, renaming `[Gmail]/Important` and moving out of All Mail are refused. Copy adds a label (message in Drafts, label and All Mail); `X-GM-LABELS` search works.
+- [x] Moving to `[Gmail]/Trash` trashes the message everywhere (label, Drafts, All Mail): now stated in the `move_messages` description.
+- [x] `delete_mailbox` on Gmail always noted "could not be unsubscribed" (Gmail drops the label's subscription on DELETE): it now unsubscribes first and re-subscribes if DELETE fails.
+- Note: Gmail's `HEADER "Message-ID" "<part>"` finds nothing for a partial ID; search by SUBJECT or the full ID.
 
 ## Done (2026-10-09 XOAUTH2 login path)
 

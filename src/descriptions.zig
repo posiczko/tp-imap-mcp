@@ -384,6 +384,8 @@ pub const move_messages =
     \\    deletion: servers may purge those folders (Gmail after 30 days).
     \\    Gmail: moving out of INBOX archives the message and applies the
     \\    destination label; every message also stays in [Gmail]/All Mail.
+    \\    Moving to [Gmail]/Trash trashes the message itself: it leaves every
+    \\    label, INBOX and All Mail, not just the source folder.
     \\    Moving out of All Mail (\All) is refused; use copy_messages to add
     \\    a label.
 ;

@@ -1653,8 +1653,14 @@ const DeleteOp = struct {
             self.refused = true;
             return;
         }
-        try s.delete(self.mailbox);
+        // Unsubscribe first: Gmail drops a deleted label's subscription and
+        // then refuses UNSUBSCRIBE. If DELETE fails, subscribe again so the
+        // folder stays visible in clients that show subscribed folders only.
         self.unsubscribed = try bestEffort(s.unsubscribe(self.mailbox));
+        s.delete(self.mailbox) catch |err| {
+            if (self.unsubscribed) _ = bestEffort(s.subscribe(self.mailbox)) catch {};
+            return err;
+        };
     }
 };
 
@@ -2700,6 +2706,34 @@ test "fake: rename carries subfolders and their subscriptions" {
     try testing.expect(h.fake.sawCommand("UNSUBSCRIBE Projects/X/Y"));
     try testing.expect(h.fake.sawCommand("SUBSCRIBE Archive/Projects/X/Y"));
     try testing.expect(!h.fake.sawCommand("SUBSCRIBE Archive/Projectsish"));
+}
+
+test "fake: delete unsubscribes before DELETE, so Gmail (which drops the label's subscription) gets no note" {
+    var h: FakeHarness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.fake.unsubscribe_needs_box = true;
+    try h.fake.addBox("Empty", &.{});
+    const o = try h.obj(try h.call("delete_mailbox", "{\"account\":\"rw\",\"name\":\"Empty\"}"));
+    try testing.expectEqualStrings("Empty", o.get("deleted").?.string);
+    try testing.expect(o.get("note").? == .null);
+    try testing.expect(commandIndex(&h.fake, "UNSUBSCRIBE Empty").? < commandIndex(&h.fake, "DELETE Empty").?);
+}
+
+fn commandIndex(fake: *imap.Fake, line: []const u8) ?usize {
+    for (fake.commands.items, 0..) |c, i| if (std.mem.eql(u8, c, line)) return i;
+    return null;
+}
+
+test "fake: a refused DELETE re-subscribes the folder it unsubscribed" {
+    var h: FakeHarness = undefined;
+    try h.init();
+    defer h.deinit();
+    try h.fake.addBox("Empty", &.{});
+    h.fake.fail = .{ .command = "DELETE", .err = error.ServerRejected, .response = "NO [fake] in use" };
+    _ = (try h.call("delete_mailbox", "{\"account\":\"rw\",\"name\":\"Empty\"}")).tool_error;
+    try testing.expect(h.fake.box("Empty") != null);
+    try testing.expect(commandIndex(&h.fake, "DELETE Empty").? < commandIndex(&h.fake, "SUBSCRIBE Empty").?);
 }
 
 test "fake: delete refuses folders with messages or subfolders and deletes empty ones" {

@@ -19,6 +19,8 @@ pub const Fake = struct {
     /// Fail the next command whose name starts with `command` (once).
     fail: ?Fail = null,
     response: []const u8 = "OK",
+    /// Gmail: UNSUBSCRIBE of a folder that no longer exists is refused.
+    unsubscribe_needs_box: bool = false,
     /// XOAUTH2 accepts only this access token (any, when null).
     accepted_token: ?[]const u8 = null,
 
@@ -277,6 +279,7 @@ pub const Fake = struct {
 
     pub fn unsubscribe(self: *Fake, mailbox: []const u8) Error!void {
         try self.command("UNSUBSCRIBE {s}", .{mailbox});
+        if (self.unsubscribe_needs_box and self.index(mailbox) == null) return self.reject("NO [NONEXISTENT] Unknown Mailbox");
     }
 
     pub fn capabilities(self: *Fake) Error!session.Caps {
