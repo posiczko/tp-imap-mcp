@@ -181,6 +181,9 @@ pub const Registry = struct {
                     const Op = @typeInfo(@TypeOf(op)).pointer.child;
                     if (comptime !retriesAfterConnectionLoss(Op)) {
                         self.setDiag("account \"{s}\": {s}", .{ self.accounts[idx].name, Op.connection_lost_message });
+                        // A change may or may not have happened (a folder
+                        // created, renamed, deleted): don't trust the list.
+                        if (self.cache(idx)) |store| store.markMailboxesStale() catch |e| self.cacheFailed(idx, e);
                         return err;
                     }
                     if (attempt == 0) continue;

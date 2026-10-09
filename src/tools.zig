@@ -2589,9 +2589,15 @@ const FakeHarness = struct {
     /// Call `init` on a harness at its final address (the registry points
     /// into it), then add folders to `h.fake`.
     fn init(h: *FakeHarness) !void {
+        return h.initCache(null);
+    }
+
+    /// Like `init`, with the on-disk cache in `cache_dir` (null: none).
+    fn initCache(h: *FakeHarness, cache_dir: ?[]const u8) !void {
         h.fake = .init(testing.allocator);
         h.accts = testAccounts();
-        h.reg = try testRegistry(&h.accts);
+        const none = [_][]const *const filter.Filter{ &.{}, &.{} };
+        h.reg = try Registry.init(testing.allocator, testing.io, &h.accts, .{ .cache_dir = cache_dir, .cache_dir_unavailable = false, .mailbox_ttl = 3600, .ca_file = config.default_ca_file }, &none);
         h.reg.fake = &h.fake;
         h.arena_state = .init(testing.allocator);
         try h.fake.addBox("INBOX", &.{});
@@ -2715,4 +2721,43 @@ test "fake: mailboxes_status with a pattern reports each folder, a rejected one 
     try testing.expectEqual(3, folders[2].object.get("MESSAGES").?.integer);
     try testing.expectEqual(3, folders[2].object.get("UNSEEN").?.integer);
     try testing.expectEqual(0, o.get("omitted").?.integer);
+}
+
+test "fake: the cached folder list follows a rename, and goes stale when the connection drops mid-change" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = dir_buf[0..try tmp.dir.realPath(testing.io, &dir_buf)];
+    var h: FakeHarness = undefined;
+    try h.initCache(dir);
+    defer h.deinit();
+    try h.fake.addBox("Projects", &.{});
+    try h.fake.addBox("Old", &.{});
+    const a = h.arena_state.allocator();
+
+    // Success: the list is refreshed with the new name (mailboxesChanged).
+    _ = try h.call("list_mailboxes", "{\"account\":\"rw\",\"directory\":\"\",\"pattern\":\"*\"}");
+    _ = (try h.call("rename_mailbox", "{\"account\":\"rw\",\"name\":\"Projects\",\"new_name\":\"Done\"}")).content;
+    const after = h.reg.freshMailboxes(0, a).?;
+    try testing.expect(organize.find(after, "Done") != null);
+    try testing.expect(organize.find(after, "Projects") == null);
+
+    // A dropped connection: the folder may or may not have been renamed, so
+    // the cached list must not be trusted.
+    h.fake.fail = .{ .command = "RENAME Old", .err = error.ConnectionLost };
+    const lost = (try h.call("rename_mailbox", "{\"account\":\"rw\",\"name\":\"Old\",\"new_name\":\"Older\"}")).tool_error;
+    try testing.expect(std.mem.find(u8, lost, "connection lost while renaming") != null);
+    try testing.expect(h.reg.freshMailboxes(0, a) == null);
+
+    // Same for create and delete.
+    _ = try h.call("list_mailboxes", "{\"account\":\"rw\",\"directory\":\"\",\"pattern\":\"*\",\"refresh\":true}");
+    try testing.expect(h.reg.freshMailboxes(0, a) != null);
+    h.fake.fail = .{ .command = "CREATE", .err = error.ConnectionLost };
+    _ = (try h.call("create_mailbox", "{\"account\":\"rw\",\"name\":\"New\"}")).tool_error;
+    try testing.expect(h.reg.freshMailboxes(0, a) == null);
+
+    _ = try h.call("list_mailboxes", "{\"account\":\"rw\",\"directory\":\"\",\"pattern\":\"*\",\"refresh\":true}");
+    h.fake.fail = .{ .command = "DELETE", .err = error.ConnectionLost };
+    _ = (try h.call("delete_mailbox", "{\"account\":\"rw\",\"name\":\"Done\"}")).tool_error;
+    try testing.expect(h.reg.freshMailboxes(0, a) == null);
 }
