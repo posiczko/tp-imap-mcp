@@ -25,6 +25,7 @@ Zig 0.17 · macOS (Apple Silicon) and Linux (Ubuntu) · MCP over stdio · MIT li
 
 - [Overview](#overview)
 - [Features](#features)
+- [Tech stack](#tech-stack)
 - [Quick start](#quick-start)
 - [Running the server](#running-the-server)
   - [1. Prerequisites](#1-prerequisites)
@@ -43,9 +44,9 @@ Zig 0.17 · macOS (Apple Silicon) and Linux (Ubuntu) · MCP over stdio · MIT li
 - [Security model](#security-model)
 - [TLS and certificates](#tls-and-certificates)
 - [Troubleshooting](#troubleshooting)
-- [Tech stack](#tech-stack)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
+- [Colophon](#colophon)
 - [License](#license)
 
 ## Overview
