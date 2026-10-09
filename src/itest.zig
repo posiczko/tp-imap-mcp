@@ -45,7 +45,27 @@ const Harness = struct {
             },
         }
     }
+
+    /// The refusal message of a call expected to fail, or null if it
+    /// succeeded (nothing is printed: the reason is what the check asserts).
+    fn refusal(h: Harness, name: []const u8, comptime args_fmt: []const u8, args: anytype) !?[]const u8 {
+        const args_json = try h.arena.print(args_fmt, args);
+        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, h.arena, args_json, .{});
+        const outcome = (try tools.call(h.reg, h.arena, name, parsed.object)) orelse return error.UnknownTool;
+        return switch (outcome) {
+            .content => null,
+            .tool_error, .invalid_params => |t| t,
+        };
+    }
 };
+
+/// True if `got` is a refusal whose message contains `reason`.
+fn refusedWith(got: ?[]const u8, reason: []const u8) bool {
+    const msg = got orelse return false;
+    if (std.mem.find(u8, msg, reason) != null) return true;
+    std.debug.print("     refused, but not for \"{s}\": {s}\n", .{ reason, msg });
+    return false;
+}
 
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
@@ -135,7 +155,8 @@ pub fn main(init: std.process.Init) !u8 {
             const r = try h.call(tool, "{{\"account\":{s},\"directory\":\"INBOX\",\"uids\":{s}}}", .{ acct, set });
             const ok = r != null and r.? == .array and r.?.array.items.len == 3 and
                 (if (std.mem.eql(u8, tool, "get_keywords"))
-                    r.?.array.items[1].object.get("4294967295").? == .null
+                    (r.?.array.items[1] == .object and
+                        if (r.?.array.items[1].object.get("4294967295")) |v| v == .null else false)
                 else
                     r.?.array.items[1] == .null) and
                 r.?.array.items[0] != .null;
@@ -400,7 +421,9 @@ fn organizeChecks(h: Harness, reg: *Registry, idx: usize, acct: []const u8, io: 
         const left = h.call("list_mailboxes", "{{\"account\":{s},\"directory\":\"\",\"pattern\":\"tp-imap-mcp-itest-*\",\"refresh\":true}}", .{acct}) catch null;
         var gone = left != null;
         if (left) |l| for (l.array.items) |m| {
-            if (std.mem.startsWith(u8, m.object.get("PATH").?.string, a)) gone = false;
+            if (stringField(m, "PATH")) |p| if (std.mem.startsWith(u8, p, a)) {
+                gone = false;
+            };
         };
         report(gone, "organize: test folders removed", .{});
     }
@@ -412,8 +435,8 @@ fn organizeChecks(h: Harness, reg: *Registry, idx: usize, acct: []const u8, io: 
     report(ca != null and cb != null, "organize: create_mailbox x2", .{});
     const listed = try h.call("list_mailboxes", "{{\"account\":{s},\"directory\":\"\",\"pattern\":\"{s}*\"}}", .{ acct, a });
     report(listed != null and listed.?.array.items.len == 2, "organize: both folders listed (cache refreshed)", .{});
-    const dup = try h.call("create_mailbox", "{{\"account\":{s},\"name\":\"{s}\"}}", .{ acct, a });
-    report(dup == null, "organize: creating an existing folder is refused", .{});
+    const dup = try h.refusal("create_mailbox", "{{\"account\":{s},\"name\":\"{s}\"}}", .{ acct, a });
+    report(refusedWith(dup, "already exists"), "organize: creating an existing folder is refused", .{});
 
     const msg = try h.arena.print("From: itest@example.invalid\r\nTo: itest@example.invalid\r\nSubject: {s}\r\nDate: Thu, 08 Oct 2026 12:00:00 +0000\r\nMessage-ID: <{x}@tp-imap-mcp.invalid>\r\n\r\nTest message; safe to delete.\r\n", .{ tag, rnd });
     var append: AppendTo = .{ .mailbox = try h.arena.dupeSentinel(u8, a, 0), .data = msg };
@@ -424,7 +447,7 @@ fn organizeChecks(h: Harness, reg: *Registry, idx: usize, acct: []const u8, io: 
     if (uid == null) return;
 
     const copied = try h.call("copy_messages", "{{\"account\":{s},\"directory\":\"{s}\",\"destination\":\"{s}\",\"uids\":[\"{s}\"]}}", .{ acct, a, b, uid.? });
-    const has_map = copied != null and copied.?.object.get("uid_map").? == .array;
+    const has_map = arrayField(copied, "uid_map") != null;
     report(intField(copied, "copied") == 1 and has_map, "organize: copy_messages by uid, uid_map present", .{});
     report((try messagesIn(h, acct, b)) == 1 and (try messagesIn(h, acct, a)) == 1, "organize: copy keeps the original", .{});
 
@@ -440,14 +463,21 @@ fn organizeChecks(h: Harness, reg: *Registry, idx: usize, acct: []const u8, io: 
     if (renamed != null) for (made.items) |*m| {
         if (std.mem.eql(u8, m.*, b)) m.* = try h.arena.dupeSentinel(u8, ab, 0);
     };
-    const nonempty = try h.call("delete_mailbox", "{{\"account\":{s},\"name\":\"{s}\"}}", .{ acct, a });
-    report(nonempty == null, "organize: delete_mailbox refuses a non-empty folder", .{});
-    const inbox = try h.call("rename_mailbox", "{{\"account\":{s},\"name\":\"INBOX\",\"new_name\":\"{s}-inbox\"}}", .{ acct, a });
-    report(inbox == null, "organize: INBOX cannot be renamed", .{});
+    const nonempty = try h.refusal("delete_mailbox", "{{\"account\":{s},\"name\":\"{s}\"}}", .{ acct, a });
+    report(refusedWith(nonempty, "is not empty"), "organize: delete_mailbox refuses a non-empty folder", .{});
+    const inbox = try h.refusal("rename_mailbox", "{{\"account\":{s},\"name\":\"INBOX\",\"new_name\":\"{s}-inbox\"}}", .{ acct, a });
+    report(refusedWith(inbox, "is protected"), "organize: INBOX cannot be renamed", .{});
     const deleted = try h.call("delete_mailbox", "{{\"account\":{s},\"name\":\"{s}\"}}", .{ acct, ab });
     report(deleted != null, "organize: delete_mailbox removes an empty folder", .{});
 
     try triageChecks(h, reg, idx, acct, a, &made, rnd);
+}
+
+fn arrayField(v: ?std.json.Value, key: []const u8) ?[]std.json.Value {
+    const o = v orelse return null;
+    if (o != .object) return null;
+    const f = o.object.get(key) orelse return null;
+    return if (f == .array) f.array.items else null;
 }
 
 fn stringField(v: ?std.json.Value, key: []const u8) ?[]const u8 {
@@ -482,26 +512,27 @@ fn triageChecks(h: Harness, reg: *Registry, idx: usize, acct: []const u8, a: []c
     reg.run(idx, &append) catch {};
 
     const gathered = try h.call("organize_mailbox", "{{\"account\":{s},\"directory\":\"{s}\",\"limit\":10}}", .{ acct, a });
-    const msgs = if (gathered) |g| g.object.get("messages").?.array.items else &.{};
-    report(msgs.len == 3 and stringField(gathered, "instructions") != null, "triage: organize_mailbox lists the 3 test messages with instructions", .{});
-    if (msgs.len != 3) return;
-    const uv = gathered.?.object.get("uidvalidity").?.integer;
-    const first = msgs[0].object.get("uid").?.string;
-    const second = msgs[1].object.get("uid").?.string;
-    const third = msgs[2].object.get("uid").?.string;
-    const actions = try h.arena.print("[{{\"uid\":\"{s}\",\"action\":\"move\",\"destination\":\"{s}\"}},{{\"uid\":\"{s}\",\"action\":\"flag\"}},{{\"uid\":\"{s}\",\"action\":\"keep\"}}]", .{ first, d, second, third });
+    const msgs = arrayField(gathered, "messages") orelse &.{};
+    const uv = intField(gathered, "uidvalidity");
+    const first = if (msgs.len == 3) stringField(msgs[0], "uid") else null;
+    const second = if (msgs.len == 3) stringField(msgs[1], "uid") else null;
+    const third = if (msgs.len == 3) stringField(msgs[2], "uid") else null;
+    report(msgs.len == 3 and uv != null and first != null and second != null and third != null and stringField(gathered, "instructions") != null, "triage: organize_mailbox lists the 3 test messages with instructions", .{});
+    if (msgs.len != 3 or uv == null or first == null or second == null or third == null) return;
+    const actions = try h.arena.print("[{{\"uid\":\"{s}\",\"action\":\"move\",\"destination\":\"{s}\"}},{{\"uid\":\"{s}\",\"action\":\"flag\"}},{{\"uid\":\"{s}\",\"action\":\"keep\"}}]", .{ first.?, d, second.?, third.? });
     const base = "{{\"account\":{s},\"directory\":\"{s}\",\"uidvalidity\":{d},\"actions\":{s}";
 
-    const dry = try h.call("apply_organization", base ++ "}}", .{ acct, a, uv, actions });
+    const dry = try h.call("apply_organization", base ++ "}}", .{ acct, a, uv.?, actions });
     const hash = stringField(dry, "plan_hash");
     report(hash != null and (try messagesIn(h, acct, a)) == 3 and (try messagesIn(h, acct, d)) == 0, "triage: dry run returns a plan_hash and changes nothing", .{});
     if (hash == null) return;
-    const wrong = try h.call("apply_organization", base ++ ",\"execute\":true,\"plan_hash\":\"0000000000000000\"}}", .{ acct, a, uv, actions });
-    report(wrong == null, "triage: execute with a wrong plan_hash is refused", .{});
-    const done = try h.call("apply_organization", base ++ ",\"execute\":true,\"plan_hash\":\"{s}\"}}", .{ acct, a, uv, actions, hash.? });
+    const wrong = try h.refusal("apply_organization", base ++ ",\"execute\":true,\"plan_hash\":\"0000000000000000\"}}", .{ acct, a, uv.?, actions });
+    report(refusedWith(wrong, "plan_hash does not match"), "triage: execute with a wrong plan_hash is refused", .{});
+    const done = try h.call("apply_organization", base ++ ",\"execute\":true,\"plan_hash\":\"{s}\"}}", .{ acct, a, uv.?, actions, hash.? });
     report(intField(done, "flagged") == 1 and intField(done, "kept") == 1 and (try messagesIn(h, acct, a)) == 2 and (try messagesIn(h, acct, d)) == 1, "triage: execute moves one, flags one, keeps one", .{});
-    const kw = try h.call("get_keywords", "{{\"account\":{s},\"directory\":\"{s}\",\"uids\":[\"{s}\"]}}", .{ acct, a, second });
-    report(hasFlags(kw, second, &.{ "\\Flagged", "$TpOrganized" }), "triage: flagged message carries \\Flagged and $TpOrganized", .{});
+    const kw = try h.call("get_keywords", "{{\"account\":{s},\"directory\":\"{s}\",\"uids\":[\"{s}\"]}}", .{ acct, a, second.? });
+    report(hasFlags(kw, second.?, &.{ "\\Flagged", "$TpOrganized" }), "triage: flagged message carries \\Flagged and $TpOrganized", .{});
     const again = try h.call("organize_mailbox", "{{\"account\":{s},\"directory\":\"{s}\",\"limit\":10}}", .{ acct, a });
-    report(again != null and again.?.object.get("messages").?.array.items.len == 0, "triage: reviewed messages are skipped next time", .{});
+    const left = arrayField(again, "messages");
+    report(left != null and left.?.len == 0, "triage: reviewed messages are skipped next time", .{});
 }

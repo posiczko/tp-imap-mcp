@@ -32,8 +32,6 @@
 
 - [ ] **COPYUID reversed ranges are expanded ascending**; RFC 4315 pairs them
   in copy order.
-- [ ] **itest:** `.?` on `uid_map`/`PATH`; refusal checks don't assert the
-  reason; the README PASS count doesn't mention `--organize`.
 - [ ] **Gmail manual check pending** (labels, Trash, All Mail).
 
 ## Done (2026-10-08 mailbox quick fixes)
@@ -48,6 +46,7 @@
 - [x] `create_missing` creates the destination only when something matches; the note says so otherwise.
 - [x] `delete_mailbox` description notes that on Gmail it removes the label.
 - [x] `mailboxes_status` takes an optional LIST `pattern`: STATUS for up to 200 matching folders in one call (auditing 184 folders had taken ~600 calls).
+- [x] itest: no unguarded `.?` on result fields (`uid_map`, `PATH`, triage fields); refusal checks assert the reason (`already exists`, `is not empty`, `is protected`, `plan_hash does not match`); README gives the `--organize` PASS count.
 - [x] Folder arguments (`name`, `directory`) are checked for NUL and UTF-8 before the fresh LIST, so a malformed call costs no server round trip.
 - [x] `forgetMoved` test: a mismatched UIDVALIDITY or mailbox deletes nothing; the matching generation loses exactly the moved UIDs.
 - [x] A dropped connection during a change that is not retried (create/rename/delete/move/copy) marks the cached folder list stale; `mailboxesChanged`'s success path has a unit test.

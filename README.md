@@ -140,11 +140,11 @@ Then run the live read-only checks against each account (they print only PASS/FA
 
 ```bash
 op run --env-file imap.env -- zig build itest -- work
-# … 29 PASS lines …
+# … about 30 PASS lines (more with --write and --organize) …
 # 0 failure(s)
 ```
 
-`--organize` also checks the folder and move/copy tools. It creates two folders named `tp-imap-mcp-itest-<random>`, appends one test message, moves, copies and renames, and removes everything again (it never touches other folders):
+`--organize` adds 20 PASS lines. It also checks the folder and move/copy tools. It creates two folders named `tp-imap-mcp-itest-<random>`, appends one test message, moves, copies and renames, and removes everything again (it never touches other folders):
 
 ```bash
 op run --env-file imap.env -- zig build itest -- work --organize
