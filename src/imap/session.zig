@@ -463,3 +463,45 @@ test "What.bits sets FETCH_PARTIAL for a partial body fetch" {
     try testing.expectEqual(c.FETCH_BODY, (What{ .body = true }).bits());
     try testing.expectEqual(16384, What.partial_bytes);
 }
+
+extern "c" fn socketpair(domain: c_uint, sock_type: c_uint, protocol: c_uint, sv: *[2]c_int) c_int;
+
+/// A libetpan session over one end of a socketpair; `script` (the server's
+/// side: greeting and replies) is queued on the other end, returned as `peer`.
+fn scriptedSession(script: []const u8) !struct { session: Session, peer: c_int } {
+    var fds: [2]c_int = undefined;
+    if (socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &fds) != 0) return error.SocketPair;
+    errdefer _ = std.c.close(fds[1]);
+    if (std.c.write(fds[1], script.ptr, script.len) != script.len) return error.ShortWrite;
+    const h = c.tpi_new() orelse return error.OutOfMemory;
+    errdefer c.tpi_free(h);
+    try check(c.tpi_attach_fd(h, fds[0]));
+    return .{ .session = .{ .handle = h }, .peer = fds[1] };
+}
+
+test "uidSearch sends the criteria with no trailing space (Gmail answers BAD to one)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var t = try scriptedSession("* OK ready\r\n* SEARCH 7 3\r\n1 OK done\r\n");
+    defer _ = std.c.close(t.peer);
+    defer t.session.abandon();
+
+    const uids = try t.session.uidSearch(arena_state.allocator(), "CHARSET UTF-8 ALL");
+    try std.testing.expectEqualSlices(u32, &.{ 7, 3 }, uids);
+
+    var buf: [256]u8 = undefined;
+    const n = std.c.read(t.peer, &buf, buf.len);
+    try std.testing.expect(n > 0);
+    try std.testing.expectEqualStrings("1 UID SEARCH CHARSET UTF-8 ALL\r\n", buf[0..@intCast(n)]);
+}
+
+test "uidSearch: a BAD reply is ServerRejected with the server's text" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var t = try scriptedSession("* OK ready\r\n1 BAD Could not parse command\r\n");
+    defer _ = std.c.close(t.peer);
+    defer t.session.abandon();
+
+    try std.testing.expectError(error.ServerRejected, t.session.uidSearch(arena_state.allocator(), "BOGUSKEY"));
+    try std.testing.expectEqualStrings("Could not parse command", t.session.lastResponse());
+}

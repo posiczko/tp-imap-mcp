@@ -109,6 +109,13 @@ long tpi_peer_certificate(tpi_session *s, char **der) {
   return n;
 }
 
+int tpi_attach_fd(tpi_session *s, int fd) {
+  mailstream *stream = mailstream_socket_open(fd);
+  if (stream == NULL)
+    return TPI_ERR_MEMORY;
+  return map_error(mailimap_connect(s->imap, stream));
+}
+
 int tpi_login(tpi_session *s, const char *user, const char *password) {
   return map_error(mailimap_login(s->imap, user, password));
 }
@@ -145,6 +152,29 @@ const char *tpi_last_response(tpi_session *s) {
   return s->imap->imap_response != NULL ? s->imap->imap_response : "";
 }
 
+/* mailimap_custom_command, minus the space libetpan's sender appends after
+ * the command text (mailimap_send_custom_command): Dovecot ignores it, Gmail
+ * answers "BAD Could not parse command". Runs the normal response parser,
+ * which leaves untagged SEARCH results in imap_response_info. */
+static int raw_command(mailimap *imap, const char *command) {
+  int r = mailimap_send_current_tag(imap);
+  if (r != MAILIMAP_NO_ERROR)
+    return r;
+  if (mailstream_write(imap->imap_stream, command, strlen(command)) == -1 ||
+      mailstream_write(imap->imap_stream, "\r\n", 2) == -1 ||
+      mailstream_flush(imap->imap_stream) == -1)
+    return MAILIMAP_ERROR_STREAM;
+  if (mailimap_read_line(imap) == NULL)
+    return MAILIMAP_ERROR_STREAM;
+  struct mailimap_response *response;
+  r = mailimap_parse_response(imap, &response);
+  if (r != MAILIMAP_NO_ERROR)
+    return r;
+  int state = response->rsp_resp_done->rsp_data.rsp_tagged->rsp_cond_state->rsp_type;
+  mailimap_response_free(response);
+  return state == MAILIMAP_RESP_COND_STATE_OK ? MAILIMAP_NO_ERROR : MAILIMAP_ERROR_CUSTOM_COMMAND;
+}
+
 int tpi_uid_search(tpi_session *s, const char *criteria, uint32_t **uids, size_t *count) {
   *uids = NULL;
   *count = 0;
@@ -156,9 +186,7 @@ int tpi_uid_search(tpi_session *s, const char *criteria, uint32_t **uids, size_t
   strcpy(cmd, "UID SEARCH ");
   strcat(cmd, criteria);
 
-  /* mailimap_custom_command runs the normal response parser, which leaves
-   * untagged SEARCH results in imap_response_info->rsp_search_result. */
-  int r = mailimap_custom_command(s->imap, cmd);
+  int r = raw_command(s->imap, cmd);
   free(cmd);
   if (r != MAILIMAP_NO_ERROR)
     return map_error(r);

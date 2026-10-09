@@ -31,6 +31,10 @@ void tpi_free(tpi_session *s);
 int tpi_connect(tpi_session *s, const char *host, uint16_t port, long timeout_sec,
                 const char *ca_file);
 
+/* Tests only: runs the session over an already-connected plain socket fd
+ * (taken over; closed by tpi_free) and reads the server greeting. */
+int tpi_attach_fd(tpi_session *s, int fd);
+
 /* DER encoding of the connected server's certificate. Returns its length, or
  * -1 if unavailable. Release *der with tpi_buf_free. */
 long tpi_peer_certificate(tpi_session *s, char **der);

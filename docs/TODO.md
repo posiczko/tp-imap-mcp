@@ -1,6 +1,6 @@
 # TODO
 
-- [ ] **Confirm OAuth live:** Gmail via the runbook; Microsoft loopback
+- [ ] **Confirm OAuth live (Microsoft):** loopback
   registration (`http://127.0.0.1`, root path) per spec §9 — Entra may need it
   added via the app manifest (`replyUrlsWithType`).
 
@@ -19,6 +19,11 @@
 ## Mailbox organization (review, 2026-10-08)
 
 - [ ] **Gmail manual check pending** (labels, Trash, All Mail).
+
+## Done (2026-10-09 Gmail live check)
+
+- [x] Gmail XOAUTH2 confirmed live (runbook steps 6–7; `itest` 0 failures).
+- [x] `search` failed on Gmail with `BAD Could not parse command`: libetpan's `mailimap_custom_command` appends a space after the command text. `tpi_uid_search` now sends the command itself; offline tests check the exact bytes.
 
 ## Done (2026-10-08 OAuth hardening)
 

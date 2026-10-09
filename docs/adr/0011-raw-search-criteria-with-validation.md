@@ -32,3 +32,14 @@ validate before anything reaches the server:
 - Server error text (e.g. "Unknown argument BOGUSKEY") is passed to the model so
   it can correct its query.
 - Validation is security-critical code with dedicated tests.
+
+## Amendment (2026-10-09)
+
+`mailimap_custom_command` sends a space after the command text
+(`mailimap_send_custom_command`). Dovecot ignores it; Gmail answers
+`BAD Could not parse command`. The shim now sends `UID SEARCH CHARSET UTF-8
+<criteria>` itself with libetpan's exported pieces (`mailimap_send_current_tag`,
+`mailstream_write`, `mailimap_read_line`, `mailimap_parse_response`), so the
+results still land in `rsp_search_result`. Tests run the shim against a
+scripted server over a socketpair (`tpi_attach_fd`, tests only) and check the
+bytes on the wire.

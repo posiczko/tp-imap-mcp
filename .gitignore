@@ -2,3 +2,4 @@
 zig-out/
 zig-pkg/
 imap.env
+reference/
