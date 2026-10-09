@@ -236,26 +236,41 @@ pub const Registry = struct {
     }
 
     /// Password LOGIN or XOAUTH2 (one token refresh-and-retry on rejection).
+    /// Every failure leaves an account diagnostic.
     fn authenticate(self: *Registry, idx: usize, s: *Session) Error!void {
         const a = &self.accounts[idx];
-        var buf: [400]u8 = undefined;
         switch (a.auth) {
-            .password => s.login(a.login, a.password) catch |err| {
-                self.setDiag("account \"{s}\": login failed: {s}", .{ a.name, unicode.cleanInto(&buf, s.lastResponse()) });
-                return if (err == error.ServerRejected) error.LoginFailed else err;
-            },
+            .password => s.login(a.login, a.password) catch |err| return self.loginFailed(idx, s, "login", err),
             .oauth2 => {
                 const first = try self.accessToken(idx, false);
                 s.oauth2Login(a.login, first) catch |err| {
-                    if (err != error.ServerRejected) return err;
+                    if (err != error.ServerRejected) return self.loginFailed(idx, s, "OAuth login", err);
                     const fresh = try self.accessToken(idx, true);
                     s.oauth2Login(a.login, fresh) catch |err2| {
-                        self.setDiag("account \"{s}\": OAuth login failed: {s}", .{ a.name, unicode.cleanInto(&buf, s.lastResponse()) });
-                        return if (err2 == error.ServerRejected) error.LoginFailed else err2;
+                        // A token the server refused twice is not reused.
+                        if (err2 == error.ServerRejected) self.forgetAccessToken(&self.slots[idx]);
+                        return self.loginFailed(idx, s, "OAuth login", err2);
                     };
                 };
             },
         }
+    }
+
+    /// Sets the diag for a failed `what` ("login", "OAuth login") and maps a
+    /// server rejection to LoginFailed.
+    fn loginFailed(self: *Registry, idx: usize, s: *Session, what: []const u8, err: Error) Error {
+        const name = self.accounts[idx].name;
+        var buf: [400]u8 = undefined;
+        switch (err) {
+            error.ServerRejected => {
+                self.setDiag("account \"{s}\": {s} failed: {s}", .{ name, what, unicode.cleanInto(&buf, s.lastResponse()) });
+                return error.LoginFailed;
+            },
+            error.ConnectionLost => self.setDiag("account \"{s}\": connection lost during {s}", .{ name, what }),
+            error.ProtocolError => self.setDiag("account \"{s}\": unparseable server response during {s}", .{ name, what }),
+            else => self.setDiag("account \"{s}\": {s} failed ({t})", .{ name, what, err }),
+        }
+        return err;
     }
 
     fn drop(self: *Registry, idx: usize) void {
@@ -669,6 +684,101 @@ test "oauth: invalid_grant tells the user to re-run auth, without the token" {
     thread.join();
     try testing.expect(std.mem.find(u8, reg.diag(), "tp_imap_mcp auth ms") != null);
     try testing.expect(std.mem.find(u8, reg.diag(), "RT") == null);
+}
+
+/// Puts `value` in the account's token slot as a valid, unexpired token.
+fn seedAccessToken(reg: *Registry, idx: usize, value: []const u8) !void {
+    const v = try reg.gpa.dupeSentinel(u8, value, 0);
+    reg.slots[idx].access = .{ .value = v[0 .. v.len + 1], .expires_at = std.math.maxInt(i64) };
+}
+
+const token_ok = "HTTP/1.1 200 OK\r\nContent-Length: 44\r\nConnection: close\r\n\r\n{\"access_token\":\"AT-ONE\",\"expires_in\":3600}";
+
+test "oauth login: a rejected cached token is refreshed once and the login retried" {
+    const server = try token.FakeServer.start(token_ok);
+    defer server.destroy();
+    const thread = try std.Thread.spawn(.{}, token.FakeServer.serveOne, .{server});
+    const url = try testing.allocator.print("http://127.0.0.1:{d}/token", .{server.port()});
+    defer testing.allocator.free(url);
+    var rt = [_:0]u8{ 'R', 'T' };
+    var accounts = [_]config.Account{oauthAccount(url, &rt)};
+    var reg: Registry = try .init(testing.allocator, testing.io, &accounts, no_cache, &no_filters_1);
+    defer reg.deinit();
+    reg.allow_insecure_token_loopback = true;
+    try seedAccessToken(&reg, 0, "STALE");
+
+    var fake: imap.Fake = .init(testing.allocator);
+    defer fake.deinit();
+    fake.accepted_token = "AT-ONE";
+    var s = Session.fromFake(&fake);
+    try reg.authenticate(0, &s);
+    thread.join();
+
+    try testing.expectEqual(2, fake.commands.items.len);
+    try testing.expectEqualStrings("AUTHENTICATE XOAUTH2 me@contoso.com STALE", fake.commands.items[0]);
+    try testing.expectEqualStrings("AUTHENTICATE XOAUTH2 me@contoso.com AT-ONE", fake.commands.items[1]);
+    // The fresh token is kept for the next connection.
+    try testing.expectEqualStrings("AT-ONE", try reg.accessToken(0, false));
+}
+
+test "oauth login: a token rejected after the refresh is forgotten, and the diag names the account" {
+    const server = try token.FakeServer.start(token_ok);
+    defer server.destroy();
+    const thread = try std.Thread.spawn(.{}, token.FakeServer.serveOne, .{server});
+    const url = try testing.allocator.print("http://127.0.0.1:{d}/token", .{server.port()});
+    defer testing.allocator.free(url);
+    var rt = [_:0]u8{ 'R', 'T' };
+    var accounts = [_]config.Account{oauthAccount(url, &rt)};
+    var reg: Registry = try .init(testing.allocator, testing.io, &accounts, no_cache, &no_filters_1);
+    defer reg.deinit();
+    reg.allow_insecure_token_loopback = true;
+    try seedAccessToken(&reg, 0, "STALE");
+
+    var fake: imap.Fake = .init(testing.allocator);
+    defer fake.deinit();
+    fake.accepted_token = "SOMETHING-ELSE";
+    var s = Session.fromFake(&fake);
+    try testing.expectError(error.LoginFailed, reg.authenticate(0, &s));
+    thread.join();
+
+    try testing.expect(reg.slots[0].access == null);
+    try testing.expect(std.mem.find(u8, reg.diag(), "account \"ms\": OAuth login failed") != null);
+    try testing.expect(std.mem.find(u8, reg.diag(), "Invalid credentials") != null);
+    try testing.expect(std.mem.find(u8, reg.diag(), "AT-ONE") == null);
+}
+
+test "oauth login: a connection lost on the first attempt keeps the token and says so" {
+    var rt = [_:0]u8{ 'R', 'T' };
+    var accounts = [_]config.Account{oauthAccount("http://127.0.0.1:1/unused", &rt)};
+    var reg: Registry = try .init(testing.allocator, testing.io, &accounts, no_cache, &no_filters_1);
+    defer reg.deinit();
+    try seedAccessToken(&reg, 0, "GOOD");
+
+    var fake: imap.Fake = .init(testing.allocator);
+    defer fake.deinit();
+    fake.fail = .{ .command = "AUTHENTICATE", .err = error.ConnectionLost, .response = "" };
+    var s = Session.fromFake(&fake);
+    try testing.expectError(error.ConnectionLost, reg.authenticate(0, &s));
+
+    // Not the token's fault: no refresh, token kept.
+    try testing.expectEqual(1, fake.commands.items.len);
+    try testing.expect(reg.slots[0].access != null);
+    try testing.expectEqualStrings("account \"ms\": connection lost during OAuth login", reg.diag());
+}
+
+test "password login: a lost connection gets its own diag, not the last server line" {
+    const pw = try testing.allocator.dupeSentinel(u8, "x", 0);
+    defer testing.allocator.free(pw);
+    var accounts = [_]config.Account{localAccount(pw, null)};
+    var reg: Registry = try .init(testing.allocator, testing.io, &accounts, no_cache, &no_filters_1);
+    defer reg.deinit();
+
+    var fake: imap.Fake = .init(testing.allocator);
+    defer fake.deinit();
+    fake.fail = .{ .command = "LOGIN", .err = error.ConnectionLost, .response = "" };
+    var s = Session.fromFake(&fake);
+    try testing.expectError(error.ConnectionLost, reg.authenticate(0, &s));
+    try testing.expect(std.mem.endsWith(u8, reg.diag(), "connection lost during login"));
 }
 
 test "forgetMoved drops only rows of the given UIDVALIDITY; a stale generation is left for syncUidvalidity" {

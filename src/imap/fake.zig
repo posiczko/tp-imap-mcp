@@ -19,6 +19,8 @@ pub const Fake = struct {
     /// Fail the next command whose name starts with `command` (once).
     fail: ?Fail = null,
     response: []const u8 = "OK",
+    /// XOAUTH2 accepts only this access token (any, when null).
+    accepted_token: ?[]const u8 = null,
 
     pub const Box = struct {
         name: []const u8,
@@ -127,6 +129,17 @@ pub const Fake = struct {
 
     pub fn lastResponse(self: *Fake) []const u8 {
         return self.response;
+    }
+
+    pub fn login(self: *Fake, user: []const u8) Error!void {
+        try self.command("LOGIN {s}", .{user});
+    }
+
+    /// Records the token (tests only) so a test can see which one was sent.
+    pub fn oauth2Login(self: *Fake, user: []const u8, access_token: []const u8) Error!void {
+        try self.command("AUTHENTICATE XOAUTH2 {s} {s}", .{ user, access_token });
+        if (self.accepted_token) |want| if (!std.mem.eql(u8, want, access_token))
+            return self.reject("NO [AUTHENTICATIONFAILED] Invalid credentials (Failure)");
     }
 
     pub fn noop(self: *Fake) Error!void {

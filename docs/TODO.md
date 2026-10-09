@@ -6,19 +6,18 @@
 
 ### From the OAuth review (2026-10-07)
 
-- [ ] **A rejected access token stays cached** after the final failed login,
-  costing an extra login attempt per later call. *Fix:* forget it on the
-  second failure.
-- [ ] **Non-rejection failures on the first XOAUTH2 attempt** (e.g. connection
-  lost) carry no account diagnostic. *Fix:* `setDiag` on every failure path.
 - [ ] **Remaining secret copies are not zeroed** (arena-held parsed token,
   std.http and libetpan buffers). Cosmetic; note or zero what we own.
-- [ ] **No offline test for the refresh-and-retry login path** (needs a fake
-  IMAP server); covered only by the live OAuth check.
 
 ## Mailbox organization (review, 2026-10-08)
 
 - [ ] **Gmail manual check pending** (labels, Trash, All Mail).
+
+## Done (2026-10-09 XOAUTH2 login path)
+
+- [x] An access token the server rejects after the forced refresh is forgotten, not reused on the next call.
+- [x] Every login failure (password or XOAUTH2, first or retried attempt) sets an account diag: rejection with the server's text, "connection lost during …", unparseable response, other errors by name.
+- [x] Offline tests for refresh-and-retry, the second rejection, and a lost connection: the fake IMAP server now handles LOGIN and AUTHENTICATE XOAUTH2 (`accepted_token`).
 
 ## Done (2026-10-09 Gmail live check)
 

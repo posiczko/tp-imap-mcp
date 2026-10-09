@@ -150,14 +150,14 @@ pub const Session = struct {
 
     pub fn login(self: *Session, user: [:0]const u8, password: [:0]const u8) Error!void {
         if (comptime builtin.is_test) if (self.fake) |f| {
-            _ = f; return;
+            return f.login(user);
         };
         try check(c.tpi_login(self.handle, user, password));
     }
 
     pub fn oauth2Login(self: *Session, user: [:0]const u8, access_token: [:0]const u8) Error!void {
         if (comptime builtin.is_test) if (self.fake) |f| {
-            _ = f; return;
+            return f.oauth2Login(user, access_token);
         };
         try check(c.tpi_oauth2_login(self.handle, user, access_token));
     }
