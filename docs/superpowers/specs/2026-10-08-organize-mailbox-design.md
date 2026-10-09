@@ -30,13 +30,13 @@ model; the server gathers input, validates the model's plan, and executes it.
 
 ### 2.1 `organize_mailbox` (read-only)
 
-| Parameter | Default | Meaning |
-|---|---|---|
-| `account` | — | required |
-| `directory` | `"INBOX"` | folder to organize |
-| `limit` | `30` | 1–200 newest messages |
-| `criteria` | none | optional IMAP SEARCH criteria narrowing the candidates (validated like `search()`) |
-| `include_reviewed` | `false` | include messages already carrying `$TpOrganized` |
+| Parameter          | Default   | Meaning                                                                            |
+|--------------------|-----------|------------------------------------------------------------------------------------|
+| `account`          | —         | required                                                                           |
+| `directory`        | `"INBOX"` | folder to organize                                                                 |
+| `limit`            | `30`      | 1–200 newest messages                                                              |
+| `criteria`         | none      | optional IMAP SEARCH criteria narrowing the candidates (validated like `search()`) |
+| `include_reviewed` | `false`   | include messages already carrying `$TpOrganized`                                   |
 
 Allowed on read-only accounts. Returns:
 
@@ -78,13 +78,13 @@ Allowed on read-only accounts. Returns:
 
 ### 2.2 `apply_organization`
 
-| Parameter | Default | Meaning |
-|---|---|---|
-| `account`, `directory` | — | as returned by `organize_mailbox` |
-| `uidvalidity` | — | as returned by `organize_mailbox` |
-| `actions` | — | array of `{uid, action, destination?}` |
-| `execute` | `false` | `true` performs the plan |
-| `plan_hash` | — | required when `execute=true` |
+| Parameter              | Default | Meaning                                |
+|------------------------|---------|----------------------------------------|
+| `account`, `directory` | —       | as returned by `organize_mailbox`      |
+| `uidvalidity`          | —       | as returned by `organize_mailbox`      |
+| `actions`              | —       | array of `{uid, action, destination?}` |
+| `execute`              | `false` | `true` performs the plan               |
+| `plan_hash`            | —       | required when `execute=true`           |
 
 Actions: `{"uid":"4711","action":"move","destination":"Receipts/2026"}`,
 `{"uid":"…","action":"delete"}`, `{"uid":"…","action":"flag"}`,

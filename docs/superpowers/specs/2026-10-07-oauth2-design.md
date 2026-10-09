@@ -24,17 +24,17 @@ nothing is written to disk.
 Per account, in addition to `IMAP_<NAME>_HOST`, `_PORT`, `_LOGIN`, `_READONLY`,
 `_DRAFTS`, `_FILTERS`:
 
-| Variable | Required | Meaning |
-|---|---|---|
-| `IMAP_<NAME>_AUTH` | no | `password` (default) or `oauth2` |
-| `IMAP_<NAME>_OAUTH_PROVIDER` | oauth2 | `google`, `microsoft`, or `custom` |
-| `IMAP_<NAME>_OAUTH_CLIENT_ID` | oauth2 | OAuth client ID |
-| `IMAP_<NAME>_OAUTH_CLIENT_SECRET` | google; optional otherwise | OAuth client secret |
-| `IMAP_<NAME>_OAUTH_REFRESH_TOKEN` | oauth2 (server mode) | Refresh token from `tp_imap_mcp auth` |
-| `IMAP_<NAME>_OAUTH_TENANT` | no | Microsoft tenant, default `common` |
-| `IMAP_<NAME>_OAUTH_AUTH_URL` | custom | Authorization endpoint (https) |
-| `IMAP_<NAME>_OAUTH_TOKEN_URL` | custom | Token endpoint (https) |
-| `IMAP_<NAME>_OAUTH_SCOPE` | custom | Space-separated scopes |
+| Variable                          | Required                   | Meaning                               |
+|-----------------------------------|----------------------------|---------------------------------------|
+| `IMAP_<NAME>_AUTH`                | no                         | `password` (default) or `oauth2`      |
+| `IMAP_<NAME>_OAUTH_PROVIDER`      | oauth2                     | `google`, `microsoft`, or `custom`    |
+| `IMAP_<NAME>_OAUTH_CLIENT_ID`     | oauth2                     | OAuth client ID                       |
+| `IMAP_<NAME>_OAUTH_CLIENT_SECRET` | google; optional otherwise | OAuth client secret                   |
+| `IMAP_<NAME>_OAUTH_REFRESH_TOKEN` | oauth2 (server mode)       | Refresh token from `tp_imap_mcp auth` |
+| `IMAP_<NAME>_OAUTH_TENANT`        | no                         | Microsoft tenant, default `common`    |
+| `IMAP_<NAME>_OAUTH_AUTH_URL`      | custom                     | Authorization endpoint (https)        |
+| `IMAP_<NAME>_OAUTH_TOKEN_URL`     | custom                     | Token endpoint (https)                |
+| `IMAP_<NAME>_OAUTH_SCOPE`         | custom                     | Space-separated scopes                |
 
 Rules (startup errors name the variable, never the value):
 
@@ -50,9 +50,9 @@ Rules (startup errors name the variable, never the value):
 
 Presets:
 
-| | Authorization URL | Token URL | Scope |
-|---|---|---|---|
-| google | `https://accounts.google.com/o/oauth2/v2/auth` | `https://oauth2.googleapis.com/token` | `https://mail.google.com/` |
+|           | Authorization URL                                                  | Token URL                                                      | Scope                                                             |
+|-----------|--------------------------------------------------------------------|----------------------------------------------------------------|-------------------------------------------------------------------|
+| google    | `https://accounts.google.com/o/oauth2/v2/auth`                     | `https://oauth2.googleapis.com/token`                          | `https://mail.google.com/`                                        |
 | microsoft | `https://login.microsoftonline.com/<tenant>/oauth2/v2.0/authorize` | `https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token` | `https://outlook.office.com/IMAP.AccessAsUser.All offline_access` |
 
 ## 3. Server mode: connecting an OAuth account
@@ -113,16 +113,16 @@ No file is written; the access token from this exchange is discarded.
 
 ## 5. Architecture
 
-| File | Responsibility |
-|---|---|
-| `src/oauth/provider.zig` | Presets, custom endpoints, authorization-URL building, form encoding |
-| `src/oauth/pkce.zig` | Verifier, S256 challenge, state |
-| `src/oauth/token.zig` | Token requests and response parsing; `AccessToken{ value, expires_at }`; refresh decision |
-| `src/oauth/flow.zig` | `auth` command: loopback listener, callback parsing, browser launch |
-| `src/c/session.c`, `tpi.h`, `src/imap/c.zig`, `src/imap/session.zig` | `tpi_oauth2_login` / `Session.oauth2Login` |
-| `src/config.zig` | `Account.auth` (`password` or `oauth2` with its settings) |
-| `src/accounts.zig` | Login branch, access-token cache, refresh-and-retry |
-| `src/main.zig` | `auth <account>` dispatch |
+| File                                                                 | Responsibility                                                                            |
+|----------------------------------------------------------------------|-------------------------------------------------------------------------------------------|
+| `src/oauth/provider.zig`                                             | Presets, custom endpoints, authorization-URL building, form encoding                      |
+| `src/oauth/pkce.zig`                                                 | Verifier, S256 challenge, state                                                           |
+| `src/oauth/token.zig`                                                | Token requests and response parsing; `AccessToken{ value, expires_at }`; refresh decision |
+| `src/oauth/flow.zig`                                                 | `auth` command: loopback listener, callback parsing, browser launch                       |
+| `src/c/session.c`, `tpi.h`, `src/imap/c.zig`, `src/imap/session.zig` | `tpi_oauth2_login` / `Session.oauth2Login`                                                |
+| `src/config.zig`                                                     | `Account.auth` (`password` or `oauth2` with its settings)                                 |
+| `src/accounts.zig`                                                   | Login branch, access-token cache, refresh-and-retry                                       |
+| `src/main.zig`                                                       | `auth <account>` dispatch                                                                 |
 
 ## 6. Errors and secrets
 

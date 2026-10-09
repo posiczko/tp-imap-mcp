@@ -10,13 +10,13 @@ It must survive interrupted writes, support lookups by (mailbox, UIDVALIDITY,
 UID), and be safe if two server processes share it. Options evaluated on
 2026-10-07:
 
-| Option | Zig 0.17 | Notes |
-|---|---|---|
-| SQLite via own C bindings | n/a | `libsqlite3` ships with macOS (SDK `libsqlite3.tbd`); Homebrew has 3.53.4 |
-| `vrischmann/zig-sqlite` | Likely broken | 622 stars, but `minimum_zig_version = 0.14.0` and uses `@cImport`; downloads its own SQLite |
-| `nDimensional/zig-sqlite` | Targets 0.17 | 52 stars, v0.5.0 this week; new Zig package dependency, downloads SQLite |
-| `canvasxyz/zig-lmdb` | 0.17 support added 2026-10-02 | Fast key-value store; needs our own record format, no queries, harder to inspect |
-| Plain JSON files | std only | Whole-file rewrites; slow for large mailboxes; not transactional |
+| Option                    | Zig 0.17                      | Notes                                                                                       |
+|---------------------------|-------------------------------|---------------------------------------------------------------------------------------------|
+| SQLite via own C bindings | n/a                           | `libsqlite3` ships with macOS (SDK `libsqlite3.tbd`); Homebrew has 3.53.4                   |
+| `vrischmann/zig-sqlite`   | Likely broken                 | 622 stars, but `minimum_zig_version = 0.14.0` and uses `@cImport`; downloads its own SQLite |
+| `nDimensional/zig-sqlite` | Targets 0.17                  | 52 stars, v0.5.0 this week; new Zig package dependency, downloads SQLite                    |
+| `canvasxyz/zig-lmdb`      | 0.17 support added 2026-10-02 | Fast key-value store; needs our own record format, no queries, harder to inspect            |
+| Plain JSON files          | std only                      | Whole-file rewrites; slow for large mailboxes; not transactional                            |
 
 ## Decision
 

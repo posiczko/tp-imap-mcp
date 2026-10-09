@@ -67,10 +67,10 @@ Built-ins live in code (`src/filter/rules.zig`) and are documented in the
 
 ### 4.1 Activation
 
-| Variable | Meaning |
-|---|---|
+| Variable              | Meaning                                                                                                 |
+|-----------------------|---------------------------------------------------------------------------------------------------------|
 | `TP_IMAP_MCP_FILTERS` | Comma-separated active filters, or `none`. **Unset = `password_reset,one_time_codes`** (on by default). |
-| `IMAP_<NAME>_FILTERS` | Same syntax; overrides the global value for one account. |
+| `IMAP_<NAME>_FILTERS` | Same syntax; overrides the global value for one account.                                                |
 
 Order matters only for which filter name is reported when several match.
 Whitespace around names is trimmed. An unknown name, an empty entry, or
@@ -124,14 +124,14 @@ Rules:
 
 Withheld marker text: `[withheld by filter "<name>"]`.
 
-| Tool | Behavior for a message matched by an active filter |
-|---|---|
-| `search`, `get_size`, `get_keywords`, `change_keywords`, `mailboxes_status`, `list_mailboxes` | Unchanged (no message content). |
-| `get_text`, `get_html` | The marker string. The body is **never fetched**: headers are obtained first (from the cache when present, else `BODY.PEEK[HEADER] RFC822.SIZE`, which also fills the cache), messages are classified, and `BODY.PEEK[]` is requested only for unmatched UIDs. |
-| `get_header` | Only the visible headers `date` and `from` (raw values, as usual), plus `"x-tp-imap-mcp-withheld": ["<name>"]`. |
-| `get_header_field` | Normal values for `date`/`from`; for any other field, `["[withheld by filter \"<name>\"]"]`. |
-| `list_accounts` | Each entry gains `"filters": ["password_reset", ...]` (the account's active filters). |
-| `clear_cache` | Unchanged. |
+| Tool                                                                                          | Behavior for a message matched by an active filter                                                                                                                                                                                                             |
+|-----------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `search`, `get_size`, `get_keywords`, `change_keywords`, `mailboxes_status`, `list_mailboxes` | Unchanged (no message content).                                                                                                                                                                                                                                |
+| `get_text`, `get_html`                                                                        | The marker string. The body is **never fetched**: headers are obtained first (from the cache when present, else `BODY.PEEK[HEADER] RFC822.SIZE`, which also fills the cache), messages are classified, and `BODY.PEEK[]` is requested only for unmatched UIDs. |
+| `get_header`                                                                                  | Only the visible headers `date` and `from` (raw values, as usual), plus `"x-tp-imap-mcp-withheld": ["<name>"]`.                                                                                                                                                |
+| `get_header_field`                                                                            | Normal values for `date`/`from`; for any other field, `["[withheld by filter \"<name>\"]"]`.                                                                                                                                                                   |
+| `list_accounts`                                                                               | Each entry gains `"filters": ["password_reset", ...]` (the account's active filters).                                                                                                                                                                          |
+| `clear_cache`                                                                                 | Unchanged.                                                                                                                                                                                                                                                     |
 
 Notes:
 
@@ -146,17 +146,17 @@ Notes:
 
 ## 6. Architecture
 
-| File | Responsibility |
-|---|---|
-| `src/filter/rules.zig` | Types `Filter`, `Rule`, `Condition`, `Matcher` (`contains`/`glob`/`regex`); built-in table; `classify`. Pure apart from regex calls. |
-| `src/filter/glob.zig` | Case-insensitive `*`/`?` matcher, O(n·m) (no backtracking), plus angle-bracket address extraction. |
-| `src/filter/regex.zig` + `src/c/regex.c` | Flat C wrapper over `regcomp`/`regexec`/`regerror`/`regfree` (ADR 0004 pattern); compiled patterns owned for the process lifetime. |
-| `src/filter/load.zig` | Read and parse `filters.zon`, validate, merge with built-ins, resolve active sets per account from §4.1 variables. |
-| `src/c/mime.c` (+ `tpi.h`, `imap/c.zig`, `imap/session.zig`) | `tpi_decode_header_value(raw, len, &out, &out_len)` via `mailmime_encoded_phrase_parse`; Zig `decodeHeaderValue`. |
-| `src/config.zig` | `Settings.config_dir`; per-account raw `IMAP_<NAME>_FILTERS`. |
-| `src/accounts.zig` | `Registry` holds each account's active filter list. |
-| `src/tools.zig`, `src/descriptions.zig` | Classification in `get_text`/`get_html`/`get_header`/`get_header_field`; `list_accounts` filters field; description updates. |
-| `src/main.zig` | Load filters at startup; exit 1 with the loader's message on error; log active filters per account to stderr. |
+| File                                                         | Responsibility                                                                                                                       |
+|--------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
+| `src/filter/rules.zig`                                       | Types `Filter`, `Rule`, `Condition`, `Matcher` (`contains`/`glob`/`regex`); built-in table; `classify`. Pure apart from regex calls. |
+| `src/filter/glob.zig`                                        | Case-insensitive `*`/`?` matcher, O(n·m) (no backtracking), plus angle-bracket address extraction.                                   |
+| `src/filter/regex.zig` + `src/c/regex.c`                     | Flat C wrapper over `regcomp`/`regexec`/`regerror`/`regfree` (ADR 0004 pattern); compiled patterns owned for the process lifetime.   |
+| `src/filter/load.zig`                                        | Read and parse `filters.zon`, validate, merge with built-ins, resolve active sets per account from §4.1 variables.                   |
+| `src/c/mime.c` (+ `tpi.h`, `imap/c.zig`, `imap/session.zig`) | `tpi_decode_header_value(raw, len, &out, &out_len)` via `mailmime_encoded_phrase_parse`; Zig `decodeHeaderValue`.                    |
+| `src/config.zig`                                             | `Settings.config_dir`; per-account raw `IMAP_<NAME>_FILTERS`.                                                                        |
+| `src/accounts.zig`                                           | `Registry` holds each account's active filter list.                                                                                  |
+| `src/tools.zig`, `src/descriptions.zig`                      | Classification in `get_text`/`get_html`/`get_header`/`get_header_field`; `list_accounts` filters field; description updates.         |
+| `src/main.zig`                                               | Load filters at startup; exit 1 with the loader's message on error; log active filters per account to stderr.                        |
 
 Data flow for `get_text`:
 

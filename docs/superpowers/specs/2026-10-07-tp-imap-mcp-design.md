@@ -28,23 +28,23 @@ An MCP server, written in Zig 0.17, that mirrors the tools and behavior of
 
 ## 2. Decisions
 
-| Decision | Choice | ADR |
-|---|---|---|
-| IMAP library | libetpan (Homebrew 1.10.1, BSD-3); GNU Mailutils rejected | 0002 |
-| Linking | Homebrew libetpan via `pkg-config` | 0003 |
-| C interop | Flat C shim (`src/c/`) + hand-written `extern fn` declarations (Zig 0.17 has no `@cImport`) | 0004 |
-| MCP layer | Hand-written JSON-RPC 2.0 over stdio on `std.json` | 0005 |
-| Multi-account | One process, `account` argument on every tool | 0006 |
-| Credentials | Environment variables resolved by `op run` | 0007 |
-| Auth | Password `LOGIN` over implicit TLS | 0008 |
-| PGP | Not decrypted; marker returned | 0009 |
-| Write tools | Kept, with per-account read-only switch | 0010 |
-| Search | Raw criteria passthrough, strict input validation | 0011 |
-| Behavior | Reference parity with listed deviations | 0012 |
-| Cache scope | Mailbox list + message headers/sizes; no bodies, no flags | 0013 |
-| Local data location | XDG base directories | 0014 |
-| Cache storage | SQLite via system `libsqlite3`, hand-written externs | 0015 |
-| TLS | Verify chain (CA bundle), SNI, and host name before LOGIN | 0016 |
+| Decision            | Choice                                                                                      | ADR  |
+|---------------------|---------------------------------------------------------------------------------------------|------|
+| IMAP library        | libetpan (Homebrew 1.10.1, BSD-3); GNU Mailutils rejected                                   | 0002 |
+| Linking             | Homebrew libetpan via `pkg-config`                                                          | 0003 |
+| C interop           | Flat C shim (`src/c/`) + hand-written `extern fn` declarations (Zig 0.17 has no `@cImport`) | 0004 |
+| MCP layer           | Hand-written JSON-RPC 2.0 over stdio on `std.json`                                          | 0005 |
+| Multi-account       | One process, `account` argument on every tool                                               | 0006 |
+| Credentials         | Environment variables resolved by `op run`                                                  | 0007 |
+| Auth                | Password `LOGIN` over implicit TLS                                                          | 0008 |
+| PGP                 | Not decrypted; marker returned                                                              | 0009 |
+| Write tools         | Kept, with per-account read-only switch                                                     | 0010 |
+| Search              | Raw criteria passthrough, strict input validation                                           | 0011 |
+| Behavior            | Reference parity with listed deviations                                                     | 0012 |
+| Cache scope         | Mailbox list + message headers/sizes; no bodies, no flags                                   | 0013 |
+| Local data location | XDG base directories                                                                        | 0014 |
+| Cache storage       | SQLite via system `libsqlite3`, hand-written externs                                        | 0015 |
+| TLS                 | Verify chain (CA bundle), SNI, and host name before LOGIN                                   | 0016 |
 
 ### 2.1 Feasibility probes (done)
 

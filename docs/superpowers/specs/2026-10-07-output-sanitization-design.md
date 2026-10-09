@@ -112,14 +112,14 @@ decoded first. A link inside a dropped subtree renders nothing.
 Applied to bodies (after §3 for HTML), decoded header values, mailbox names,
 and server error text in diagnostics (`src/sanitize/unicode.zig`). Removed:
 
-| Range | What |
-|---|---|
-| U+0000–U+0008, U+000B–U+001F, U+007F, U+0080–U+009F | C0/C1 controls (except `\t`, `\n`; `\r` is removed after LF normalization) |
-| U+00AD | soft hyphen |
-| U+061C, U+200E, U+200F, U+202A–U+202E, U+2066–U+2069 | bidi marks and overrides |
-| U+200B–U+200D, U+2060–U+2064, U+FEFF | zero-width and invisible operators |
-| U+E0000–U+E007F | tag characters |
-| U+E0100–U+E01EF | supplementary variation selectors |
+| Range                                                | What                                                                       |
+|------------------------------------------------------|----------------------------------------------------------------------------|
+| U+0000–U+0008, U+000B–U+001F, U+007F, U+0080–U+009F  | C0/C1 controls (except `\t`, `\n`; `\r` is removed after LF normalization) |
+| U+00AD                                               | soft hyphen                                                                |
+| U+061C, U+200E, U+200F, U+202A–U+202E, U+2066–U+2069 | bidi marks and overrides                                                   |
+| U+200B–U+200D, U+2060–U+2064, U+FEFF                 | zero-width and invisible operators                                         |
+| U+E0000–U+E007F                                      | tag characters                                                             |
+| U+E0100–U+E01EF                                      | supplementary variation selectors                                          |
 
 Kept: U+FE00–U+FE0F (emoji/text presentation), all visible text.
 U+2028 and U+2029 become `\n`. Input is valid UTF-8 (already sanitized);
@@ -153,10 +153,10 @@ markers stay as they are.
 
 ### 5.3 Configuration
 
-| Variable | Default | Rule |
-|---|---|---|
-| `TP_IMAP_MCP_MAX_BODY_BYTES` | 32768 | integer ≥ 1024 |
-| `TP_IMAP_MCP_MAX_RESPONSE_BYTES` | 131072 | integer ≥ 1024 |
+| Variable                         | Default | Rule           |
+|----------------------------------|---------|----------------|
+| `TP_IMAP_MCP_MAX_BODY_BYTES`     | 32768   | integer ≥ 1024 |
+| `TP_IMAP_MCP_MAX_RESPONSE_BYTES` | 131072  | integer ≥ 1024 |
 
 Invalid values stop startup with a message naming the variable.
 
@@ -176,18 +176,18 @@ messages keep their visible `date`/`from` (now decoded and cleaned too).
 
 ## 8. Architecture
 
-| File | Responsibility |
-|---|---|
-| `src/sanitize/html.zig` | Tokenizer + converter (§3). |
-| `src/sanitize/entities.zig` | Entity decoding (§3.6). |
-| `src/sanitize/unicode.zig` | Invisible/control character removal (§4). |
-| `src/sanitize/limit.zig` | `truncate(arena, text, max)`; `Budget` (§5). |
+| File                                                                    | Responsibility                                                                                                  |
+|-------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------|
+| `src/sanitize/html.zig`                                                 | Tokenizer + converter (§3).                                                                                     |
+| `src/sanitize/entities.zig`                                             | Entity decoding (§3.6).                                                                                         |
+| `src/sanitize/unicode.zig`                                              | Invisible/control character removal (§4).                                                                       |
+| `src/sanitize/limit.zig`                                                | `truncate(arena, text, max)`; `Budget` (§5).                                                                    |
 | `src/c/mime.c`, `src/c/tpi.h`, `src/imap/c.zig`, `src/imap/session.zig` | Extraction can report whether any part of the requested subtype was found, so `get_text` can fall back to HTML. |
-| `src/body.zig` | `render(arena, message, kind, max_body)` implements §2 steps 2–5. |
-| `src/tools.zig` | Header decoding/cleaning/capping; budgets; mailbox-name cleaning. |
-| `src/accounts.zig` | Diagnostics cleaned. |
-| `src/config.zig` | `Settings.max_body_bytes`, `Settings.max_response_bytes`. |
-| `src/descriptions.zig` | Plain-text output, link format, markers. |
+| `src/body.zig`                                                          | `render(arena, message, kind, max_body)` implements §2 steps 2–5.                                               |
+| `src/tools.zig`                                                         | Header decoding/cleaning/capping; budgets; mailbox-name cleaning.                                               |
+| `src/accounts.zig`                                                      | Diagnostics cleaned.                                                                                            |
+| `src/config.zig`                                                        | `Settings.max_body_bytes`, `Settings.max_response_bytes`.                                                       |
+| `src/descriptions.zig`                                                  | Plain-text output, link format, markers.                                                                        |
 
 ## 9. Errors
 

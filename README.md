@@ -1,15 +1,19 @@
 # tp-imap-mcp
 
-An MCP server that lets an AI assistant read, search and organize several IMAP
+An MCP server that lets an AI assistant read, search, and organize several IMAP
 mailboxes. TLS is verified, headers are cached locally, sensitive mail is kept
 from the model by filters, and credentials can come from 1Password.
 
 Zig 0.17 · macOS (Apple Silicon) and Linux (Ubuntu) · MCP over stdio · MIT license
 
 > [!CAUTION]
-> # TINKERING PROJECT — USE AT YOUR OWN RISK
+> # USE AT YOUR OWN RISK
 >
-> ## This is a hobby project for learning Zig. It is not a product, not audited, and comes with no support or warranty.
+> ## This is a hobby project. It is not a product, not audited, and comes with no support or warranty.
+> 
+> I started this project to learn Zig, but my itch of unorganized email was too real, my middle name name is 
+> Impatience, so I used Claude to build it up. 
+> This MCP did help me organize my voluminous email archives. It worked for me, but you should not trust me.
 >
 > ## Prompt injection is real.
 >
@@ -57,17 +61,27 @@ tp-imap-mcp exposes IMAP mailboxes to MCP clients (Claude Code, Claude Desktop, 
 
 ## Features
 
-| Feature | Description |
-|---|---|
-| Multiple accounts | One server process, an `account` argument on every tool. |
-| Credentials | Environment variables from a private (`0600`) env file — or `op://` references resolved by `op run`, keeping secrets in 1Password. |
-| Verified TLS | Certificate chain checked against a CA bundle, SNI set, host name verified **before** the password is sent. |
-| Mail organization | Create, rename/move and delete folders; move or copy messages by UID or by search criteria, with dry runs and protected system folders. |
-| Read-only by default | Every account refuses the tools that change the mailbox until you set `IMAP_<NAME>_READONLY=0`; reads never mark mail as seen. |
-| Local cache | Mailbox list and message headers/sizes cached in SQLite under `~/.cache/tp-imap-mcp/`. |
-| Full IMAP search | The model's IMAP `SEARCH` criteria are passed through, with input validation against command injection. |
+| Feature                   | Description                                                                                                                                      |
+|---------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------|
+| Multiple accounts         | One server process, an `account` argument on every tool.                                                                                         |
+| Credentials               | Environment variables from a private (`0600`) env file — or `op://` references resolved by `op run`, keeping secrets in 1Password.               |
+| Verified TLS              | Certificate chain checked against a CA bundle, SNI set, host name verified **before** the password is sent.                                      |
+| Mail organization         | Create, rename/move and delete folders; move or copy messages by UID or by search criteria, with dry runs and protected system folders.          |
+| Read-only by default      | Every account refuses the tools that change the mailbox until you set `IMAP_<NAME>_READONLY=0`; reads never mark mail as seen.                   |
+| Local cache               | Mailbox list and message headers/sizes cached in SQLite under `~/.cache/tp-imap-mcp/`.                                                           |
+| Full IMAP search          | The model's IMAP `SEARCH` criteria are passed through, with input validation against command injection.                                          |
 | Sensitive-content filters | Password-reset and one-time-code emails (and anything you define) are withheld: the model learns they exist, never their content. On by default. |
-| Output sanitization | Plain text only; hidden HTML, comments, scripts and invisible Unicode removed; headers decoded; size caps — a defense against prompt injection. |
+| Output sanitization       | Plain text only; hidden HTML, comments, scripts and invisible Unicode removed; headers decoded; size caps — a defense against prompt injection.  |
+
+## Tech stack
+
+| Component   | Technology                                                                 |
+|-------------|----------------------------------------------------------------------------|
+| Language    | Zig 0.17 (+ a small C shim)                                                |
+| IMAP & MIME | libetpan 1.10 (Homebrew)                                                   |
+| TLS         | OpenSSL (via libetpan) + Zig `std.crypto.Certificate` for host-name checks |
+| Cache       | SQLite (macOS system `libsqlite3`)                                         |
+| Protocol    | MCP over stdio (JSON-RPC 2.0, hand-written)                                |
 
 ## Quick start
 
@@ -90,13 +104,13 @@ The full walkthrough follows.
 
 ### 1. Prerequisites
 
-| Requirement | macOS (Apple Silicon) | Ubuntu / Debian | Check |
-|---|---|---|---|
-| Zig **0.17.0** | `brew install zig` | [ziglang.org/download](https://ziglang.org/download/) or `snap install zig --classic` | `zig version` → `0.17.0` |
-| libetpan (IMAP/MIME) | `brew install libetpan` | `apt install libetpan-dev` | `pkg-config --modversion libetpan` → `1.10.x` (macOS), `1.9.x` (Ubuntu) |
-| CA certificates (TLS) | `brew install ca-certificates` | `apt install ca-certificates` | `ls /opt/homebrew/etc/ca-certificates/cert.pem` / `ls /etc/ssl/certs/ca-certificates.crt` |
-| SQLite, pkg-config | ships with macOS / Homebrew | `apt install libsqlite3-dev pkg-config` | — |
-| 1Password CLI *(optional)* | `brew install 1password-cli` | [1Password CLI for Linux](https://developer.1password.com/docs/cli/get-started/) | `op --version` — only for [secrets in 1Password](#keeping-secrets-in-1password-optional) |
+| Requirement                | macOS (Apple Silicon)          | Ubuntu / Debian                                                                       | Check                                                                                     |
+|----------------------------|--------------------------------|---------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------|
+| Zig **0.17.0**             | `brew install zig`             | [ziglang.org/download](https://ziglang.org/download/) or `snap install zig --classic` | `zig version` → `0.17.0`                                                                  |
+| libetpan (IMAP/MIME)       | `brew install libetpan`        | `apt install libetpan-dev`                                                            | `pkg-config --modversion libetpan` → `1.10.x` (macOS), `1.9.x` (Ubuntu)                   |
+| CA certificates (TLS)      | `brew install ca-certificates` | `apt install ca-certificates`                                                         | `ls /opt/homebrew/etc/ca-certificates/cert.pem` / `ls /etc/ssl/certs/ca-certificates.crt` |
+| SQLite, pkg-config         | ships with macOS / Homebrew    | `apt install libsqlite3-dev pkg-config`                                               | —                                                                                         |
+| 1Password CLI *(optional)* | `brew install 1password-cli`   | [1Password CLI for Linux](https://developer.1password.com/docs/cli/get-started/)      | `op --version` — only for [secrets in 1Password](#keeping-secrets-in-1password-optional)  |
 
 > [!NOTE]
 > On Linux, libetpan is built with GnuTLS, which cannot check the server's certificate chain against a CA file. The server then checks the chain itself (Zig `std.crypto`) before sending any credential; this covers chain, validity and CA flags, but not revocation. See [TLS and certificates](#tls-and-certificates).
@@ -257,49 +271,49 @@ npx @modelcontextprotocol/inspector sh -c 'set -a; . ./imap.env; exec ./zig-out/
 
 ### 7. Day-to-day operation
 
-| Task | How |
-|---|---|
-| Update after code changes | `zig build -Doptimize=safe --prefix ~/.local`, then restart / reconnect the client (`/mcp` in Claude Code) |
-| Add an account | Add its name to `IMAP_ACCOUNTS` and an `IMAP_<NAME>_*` block; restart the client |
-| Change a password | Edit `imap.env` (or the 1Password item); restart the client |
-| Allow changes on an account | `IMAP_<NAME>_READONLY=0` (read-only is the default); restart |
-| See new folders immediately | Ask the assistant to list mailboxes with refresh, or wait for the TTL (1 h) |
-| Clear cached data | Ask the assistant to clear the cache, or `rm ~/.cache/tp-imap-mcp/<account>.sqlite3*` |
-| Disable the cache | `TP_IMAP_MCP_CACHE=0` |
-| Logs | The server logs to **stderr**; MCP clients usually keep it in their MCP log (Claude Code: `claude --debug`) |
-| See what the MCP did | Every tool call is in `~/.local/state/tp-imap-mcp/audit.log` (JSON Lines), e.g. `grep '"rename_mailbox\|"delete_mailbox' ~/.local/state/tp-imap-mcp/audit.log` |
+| Task                        | How                                                                                                                                                            |
+|-----------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Update after code changes   | `zig build -Doptimize=safe --prefix ~/.local`, then restart / reconnect the client (`/mcp` in Claude Code)                                                     |
+| Add an account              | Add its name to `IMAP_ACCOUNTS` and an `IMAP_<NAME>_*` block; restart the client                                                                               |
+| Change a password           | Edit `imap.env` (or the 1Password item); restart the client                                                                                                    |
+| Allow changes on an account | `IMAP_<NAME>_READONLY=0` (read-only is the default); restart                                                                                                   |
+| See new folders immediately | Ask the assistant to list mailboxes with refresh, or wait for the TTL (1 h)                                                                                    |
+| Clear cached data           | Ask the assistant to clear the cache, or `rm ~/.cache/tp-imap-mcp/<account>.sqlite3*`                                                                          |
+| Disable the cache           | `TP_IMAP_MCP_CACHE=0`                                                                                                                                          |
+| Logs                        | The server logs to **stderr**; MCP clients usually keep it in their MCP log (Claude Code: `claude --debug`)                                                    |
+| See what the MCP did        | Every tool call is in `~/.local/state/tp-imap-mcp/audit.log` (JSON Lines), e.g. `grep '"rename_mailbox\|"delete_mailbox' ~/.local/state/tp-imap-mcp/audit.log` |
 
 ## Configuration
 
 All configuration is environment variables, usually loaded from `~/.config/tp-imap-mcp/imap.env` (see [Write `imap.env`](#3-write-imapenv)). Any value may instead be an `op://` reference when you launch through `op run` ([1Password](#keeping-secrets-in-1password-optional)).
 
-| Variable | Required | Meaning |
-|---|---|---|
-| `IMAP_ACCOUNTS` | yes | Comma-separated account names, e.g. `work,personal` (`[A-Za-z0-9_]+`) |
-| `IMAP_<NAME>_HOST` | yes | IMAP server host name |
-| `IMAP_<NAME>_LOGIN` | yes | Login |
-| `IMAP_<NAME>_PASSWORD` | password auth | Password; must not be set with `AUTH=oauth2` |
-| `IMAP_<NAME>_AUTH` | no | `password` (default) or `oauth2` — see [OAuth accounts](#oauth-accounts) |
-| `IMAP_<NAME>_OAUTH_PROVIDER` | oauth2 | `google`, `microsoft`, or `custom` |
-| `IMAP_<NAME>_OAUTH_CLIENT_ID` | oauth2 | OAuth client ID |
-| `IMAP_<NAME>_OAUTH_CLIENT_SECRET` | google | OAuth client secret (optional for Microsoft) |
-| `IMAP_<NAME>_OAUTH_REFRESH_TOKEN` | oauth2 | From `tp_imap_mcp auth <account>` |
-| `IMAP_<NAME>_OAUTH_TENANT` | no | Microsoft tenant (default `common`) |
-| `IMAP_<NAME>_OAUTH_AUTH_URL`, `_TOKEN_URL`, `_SCOPE` | custom | Endpoints (https) and scopes for a custom provider |
-| `IMAP_<NAME>_PORT` | no | Default `993` (implicit TLS) |
-| `IMAP_<NAME>_READONLY` | no | Default read-only; `0`/`false`/`no` allows changes (`1`/`true`/`yes` is read-only) |
-| `IMAP_<NAME>_DRAFTS` | no | Drafts folder; default is the server's `\Drafts` folder, else `Drafts` |
-| `TP_IMAP_MCP_CACHE` | no | `0` disables the on-disk cache |
-| `TP_IMAP_MCP_MAILBOX_TTL` | no | Seconds the cached mailbox list stays fresh (default `3600`) |
-| `TP_IMAP_MCP_CA_FILE` | no | PEM bundle for TLS verification (default `/opt/homebrew/etc/ca-certificates/cert.pem` on macOS, `/etc/ssl/certs/ca-certificates.crt` on Linux) |
-| `XDG_CACHE_HOME` | no | Cache location base (default `~/.cache`) |
-| `TP_IMAP_MCP_FILTERS` | no | Active sensitive-content filters, comma-separated, or `none` (default `password_reset,one_time_codes`) |
-| `IMAP_<NAME>_FILTERS` | no | Per-account override of `TP_IMAP_MCP_FILTERS` |
-| `XDG_CONFIG_HOME` | no | Config location base for `filters.zon` (default `~/.config`) |
-| `TP_IMAP_MCP_MAX_BODY_BYTES` | no | Max bytes per message body after sanitizing (default `32768`, min `1024`) |
-| `TP_IMAP_MCP_MAX_RESPONSE_BYTES` | no | Size budget per per-UID tool response (default `131072`, min `1024`) |
-| `TP_IMAP_MCP_AUDIT` | no | `0` disables the audit log of tool calls |
-| `TP_IMAP_MCP_AUDIT_FILE` | no | Audit log path, absolute (default `$XDG_STATE_HOME/tp-imap-mcp/audit.log`, i.e. `~/.local/state/…`) |
+| Variable                                             | Required      | Meaning                                                                                                                                        |
+|------------------------------------------------------|---------------|------------------------------------------------------------------------------------------------------------------------------------------------|
+| `IMAP_ACCOUNTS`                                      | yes           | Comma-separated account names, e.g. `work,personal` (`[A-Za-z0-9_]+`)                                                                          |
+| `IMAP_<NAME>_HOST`                                   | yes           | IMAP server host name                                                                                                                          |
+| `IMAP_<NAME>_LOGIN`                                  | yes           | Login                                                                                                                                          |
+| `IMAP_<NAME>_PASSWORD`                               | password auth | Password; must not be set with `AUTH=oauth2`                                                                                                   |
+| `IMAP_<NAME>_AUTH`                                   | no            | `password` (default) or `oauth2` — see [OAuth accounts](#oauth-accounts)                                                                       |
+| `IMAP_<NAME>_OAUTH_PROVIDER`                         | oauth2        | `google`, `microsoft`, or `custom`                                                                                                             |
+| `IMAP_<NAME>_OAUTH_CLIENT_ID`                        | oauth2        | OAuth client ID                                                                                                                                |
+| `IMAP_<NAME>_OAUTH_CLIENT_SECRET`                    | google        | OAuth client secret (optional for Microsoft)                                                                                                   |
+| `IMAP_<NAME>_OAUTH_REFRESH_TOKEN`                    | oauth2        | From `tp_imap_mcp auth <account>`                                                                                                              |
+| `IMAP_<NAME>_OAUTH_TENANT`                           | no            | Microsoft tenant (default `common`)                                                                                                            |
+| `IMAP_<NAME>_OAUTH_AUTH_URL`, `_TOKEN_URL`, `_SCOPE` | custom        | Endpoints (https) and scopes for a custom provider                                                                                             |
+| `IMAP_<NAME>_PORT`                                   | no            | Default `993` (implicit TLS)                                                                                                                   |
+| `IMAP_<NAME>_READONLY`                               | no            | Default read-only; `0`/`false`/`no` allows changes (`1`/`true`/`yes` is read-only)                                                             |
+| `IMAP_<NAME>_DRAFTS`                                 | no            | Drafts folder; default is the server's `\Drafts` folder, else `Drafts`                                                                         |
+| `TP_IMAP_MCP_CACHE`                                  | no            | `0` disables the on-disk cache                                                                                                                 |
+| `TP_IMAP_MCP_MAILBOX_TTL`                            | no            | Seconds the cached mailbox list stays fresh (default `3600`)                                                                                   |
+| `TP_IMAP_MCP_CA_FILE`                                | no            | PEM bundle for TLS verification (default `/opt/homebrew/etc/ca-certificates/cert.pem` on macOS, `/etc/ssl/certs/ca-certificates.crt` on Linux) |
+| `XDG_CACHE_HOME`                                     | no            | Cache location base (default `~/.cache`)                                                                                                       |
+| `TP_IMAP_MCP_FILTERS`                                | no            | Active sensitive-content filters, comma-separated, or `none` (default `password_reset,one_time_codes`)                                         |
+| `IMAP_<NAME>_FILTERS`                                | no            | Per-account override of `TP_IMAP_MCP_FILTERS`                                                                                                  |
+| `XDG_CONFIG_HOME`                                    | no            | Config location base for `filters.zon` (default `~/.config`)                                                                                   |
+| `TP_IMAP_MCP_MAX_BODY_BYTES`                         | no            | Max bytes per message body after sanitizing (default `32768`, min `1024`)                                                                      |
+| `TP_IMAP_MCP_MAX_RESPONSE_BYTES`                     | no            | Size budget per per-UID tool response (default `131072`, min `1024`)                                                                           |
+| `TP_IMAP_MCP_AUDIT`                                  | no            | `0` disables the audit log of tool calls                                                                                                       |
+| `TP_IMAP_MCP_AUDIT_FILE`                             | no            | Audit log path, absolute (default `$XDG_STATE_HOME/tp-imap-mcp/audit.log`, i.e. `~/.local/state/…`)                                            |
 
 `<NAME>` is the upper-cased account name. Invalid configuration stops startup with a message naming the variable — never its value.
 
@@ -419,60 +433,60 @@ IMAP_WORK_PASSWORD='op://Private/Work IMAP/password'
 
 **4. Run commands through `op run`.** Wherever this README runs `sh -c 'set -a; . FILE; exec COMMAND'`, run `op run --env-file FILE -- COMMAND` instead:
 
-| Task | With 1Password |
-|---|---|
-| Check the configuration | `op run --env-file imap.env -- ./zig-out/bin/tp_imap_mcp </dev/null` |
-| Live checks | `op run --env-file imap.env -- zig build itest -- work` |
-| Register with Claude Code | `claude mcp add --scope user imap -- op run --env-file "$HOME/.config/tp-imap-mcp/imap.env" -- "$HOME/.local/bin/tp_imap_mcp"` |
+| Task                           | With 1Password                                                                                                                                             |
+|--------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Check the configuration        | `op run --env-file imap.env -- ./zig-out/bin/tp_imap_mcp </dev/null`                                                                                       |
+| Live checks                    | `op run --env-file imap.env -- zig build itest -- work`                                                                                                    |
+| Register with Claude Code      | `claude mcp add --scope user imap -- op run --env-file "$HOME/.config/tp-imap-mcp/imap.env" -- "$HOME/.local/bin/tp_imap_mcp"`                             |
 | Claude Desktop / other clients | `"command": "/opt/homebrew/bin/op"`, `"args": ["run", "--env-file", "/Users/you/.config/tp-imap-mcp/imap.env", "--", "/Users/you/.local/bin/tp_imap_mcp"]` |
-| OAuth `auth` | `op run --env-file imap.env -- ~/.local/bin/tp_imap_mcp auth work \| pbcopy` |
+| OAuth `auth`                   | `op run --env-file imap.env -- ~/.local/bin/tp_imap_mcp auth work \| pbcopy`                                                                               |
 
 **5. OAuth refresh tokens.** Paste the token from `auth` into a password field of the item in the **1Password app**, and reference it as `IMAP_<NAME>_OAUTH_REFRESH_TOKEN='op://…/refresh token'`. Don't pass it to `op item edit` on the command line: it would stay in your shell history and be visible to other processes. `op run` fails on a reference to a field that does not exist yet, so keep that line commented out until the field exists.
 
-| Symptom | Cause / fix |
-|---|---|
-| `[ERROR] … item '…' does not have a field '…'` | Wrong field label in an `op://` reference — list labels with the `op item get … \| jq` command above. |
+| Symptom                                                              | Cause / fix                                                                                                                            |
+|----------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
+| `[ERROR] … item '…' does not have a field '…'`                       | Wrong field label in an `op://` reference — list labels with the `op item get … \| jq` command above.                                  |
 | `could not find item … in vault …` / `isn't a vault in this account` | Wrong vault name, or you're signed in to a different 1Password account: `op account list`, add `--account <shorthand>` after `op run`. |
-| `invalid character in secret reference` | Two variables ran together on one line (missing newline) — keep one `KEY=value` per line. |
-| `error initializing client: authorization timeout` | Approve the 1Password prompt (Touch ID) in time, or unlock 1Password first. |
-| Server fails to start only inside the MCP client | `op` can't unlock non-interactively — see step 1. Use absolute paths for `op` and the binary in GUI clients. |
+| `invalid character in secret reference`                              | Two variables ran together on one line (missing newline) — keep one `KEY=value` per line.                                              |
+| `error initializing client: authorization timeout`                   | Approve the 1Password prompt (Touch ID) in time, or unlock 1Password first.                                                            |
+| Server fails to start only inside the MCP client                     | `op` can't unlock non-interactively — see step 1. Use absolute paths for `op` and the binary in GUI clients.                           |
 
 ## Tools
 
 Every tool except `list_accounts` takes an `account` argument.
 
-| Tool | What it does |
-|---|---|
-| `list_accounts` | Configured accounts, logins, read-only status |
-| `whoami` | The account's login |
-| `list_mailboxes` | Folders matching a LIST pattern (`*`, `%`); `refresh: true` bypasses the cache |
-| `mailboxes_status` | `MESSAGES`, `RECENT`, `UNSEEN` counts |
-| `search` | UIDs matching IMAP SEARCH criteria (default `ALL` in `INBOX`) |
-| `get_header` / `get_header_field` | Raw headers, or one field, per UID |
-| `get_text` / `get_html` | Message body per UID as sanitized plain text (`get_text` prefers the plain-text part) |
-| `list_attachments` | Attachments per UID: file name, type, approximate size, inline flag — content is never downloaded |
-| `get_size` | Message size in bytes |
-| `get_keywords` / `change_keywords` | Read / add / remove IMAP flags and keywords |
-| `create_message` | Append a raw RFC 822 message to the Drafts folder |
-| `create_mailbox` | Create a folder (and subscribe to it) |
-| `rename_mailbox` | Rename a folder or move it under another parent |
-| `delete_mailbox` | Delete an empty folder |
-| `move_messages` / `copy_messages` | Move or copy messages by `uids` or by search `criteria`; criteria default to a dry run |
-| `organize_mailbox` | Gather the organizing instructions, folders and newest messages for the model to classify |
-| `apply_organization` | Preview (dry run) or carry out the model's per-message plan: move, delete (to Trash), flag, keep |
-| `clear_cache` | Delete the account's local cache |
+| Tool                               | What it does                                                                                      |
+|------------------------------------|---------------------------------------------------------------------------------------------------|
+| `list_accounts`                    | Configured accounts, logins, read-only status                                                     |
+| `whoami`                           | The account's login                                                                               |
+| `list_mailboxes`                   | Folders matching a LIST pattern (`*`, `%`); `refresh: true` bypasses the cache                    |
+| `mailboxes_status`                 | `MESSAGES`, `RECENT`, `UNSEEN` counts                                                             |
+| `search`                           | UIDs matching IMAP SEARCH criteria (default `ALL` in `INBOX`)                                     |
+| `get_header` / `get_header_field`  | Raw headers, or one field, per UID                                                                |
+| `get_text` / `get_html`            | Message body per UID as sanitized plain text (`get_text` prefers the plain-text part)             |
+| `list_attachments`                 | Attachments per UID: file name, type, approximate size, inline flag — content is never downloaded |
+| `get_size`                         | Message size in bytes                                                                             |
+| `get_keywords` / `change_keywords` | Read / add / remove IMAP flags and keywords                                                       |
+| `create_message`                   | Append a raw RFC 822 message to the Drafts folder                                                 |
+| `create_mailbox`                   | Create a folder (and subscribe to it)                                                             |
+| `rename_mailbox`                   | Rename a folder or move it under another parent                                                   |
+| `delete_mailbox`                   | Delete an empty folder                                                                            |
+| `move_messages` / `copy_messages`  | Move or copy messages by `uids` or by search `criteria`; criteria default to a dry run            |
+| `organize_mailbox`                 | Gather the organizing instructions, folders and newest messages for the model to classify         |
+| `apply_organization`               | Preview (dry run) or carry out the model's per-message plan: move, delete (to Trash), flag, keep  |
+| `clear_cache`                      | Delete the account's local cache                                                                  |
 
 Per-UID results are aligned with the requested UIDs (`null` for UIDs that don't exist). Reading never sets `\Seen`. PGP/MIME messages are not decrypted; a marker is returned instead.
 
 What the model sees, after filtering and sanitizing:
 
-| Situation | Output |
-|---|---|
-| Message matched by a filter | `get_text`/`get_html`: `[withheld by filter "password_reset"]`; `get_header`: only `date`, `from`, `x-tp-imap-mcp-withheld` |
-| HTML email | Plain text; links as `text (https://…)`; hidden elements, comments, scripts, images dropped |
-| Long body | Cut at 32 KiB with `[truncated: N bytes omitted]` |
-| Too many UIDs at once | Later items become `[omitted: response size limit reached; request fewer UIDs]` |
-| Encoded headers (`=?UTF-8?B?…?=`) | Decoded, invisible characters removed, 2 KiB max per value |
+| Situation                         | Output                                                                                                                      |
+|-----------------------------------|-----------------------------------------------------------------------------------------------------------------------------|
+| Message matched by a filter       | `get_text`/`get_html`: `[withheld by filter "password_reset"]`; `get_header`: only `date`, `from`, `x-tp-imap-mcp-withheld` |
+| HTML email                        | Plain text; links as `text (https://…)`; hidden elements, comments, scripts, images dropped                                 |
+| Long body                         | Cut at 32 KiB with `[truncated: N bytes omitted]`                                                                           |
+| Too many UIDs at once             | Later items become `[omitted: response size limit reached; request fewer UIDs]`                                             |
+| Encoded headers (`=?UTF-8?B?…?=`) | Decoded, invisible characters removed, 2 KiB max per value                                                                  |
 
 ### Organizing mail
 
@@ -533,10 +547,10 @@ If any check fails, the connection is closed and nothing is sent. The tool error
 
 **The CA bundle** is a PEM file of trusted root certificates, the same kind your operating system and browser use:
 
-| Platform | Default bundle | Provided by |
-|---|---|---|
-| macOS | `/opt/homebrew/etc/ca-certificates/cert.pem` | `brew install ca-certificates` (Mozilla's root list) |
-| Linux | `/etc/ssl/certs/ca-certificates.crt` | `apt install ca-certificates` |
+| Platform | Default bundle                               | Provided by                                          |
+|----------|----------------------------------------------|------------------------------------------------------|
+| macOS    | `/opt/homebrew/etc/ca-certificates/cert.pem` | `brew install ca-certificates` (Mozilla's root list) |
+| Linux    | `/etc/ssl/certs/ca-certificates.crt`         | `apt install ca-certificates`                        |
 
 `TP_IMAP_MCP_CA_FILE` points at a different bundle. The same bundle is used for OAuth token requests (HTTPS).
 
@@ -560,38 +574,29 @@ Connect by the name on the certificate: `IMAP_<NAME>_HOST=mail.example.org` work
 
 ## Troubleshooting
 
-| Symptom | Cause / fix |
-|---|---|
-| `imap.env: line N: …: command not found` | A value on line N contains a space or shell character and is not quoted — put it in single quotes. |
-| `imap.env: No such file or directory` | Wrong path in the `sh -c` command; GUI clients need absolute paths (no `~` or `$HOME`). |
-| Server fails to start only inside the MCP client | Use absolute paths for the env file and the binary; with 1Password, see [its troubleshooting](#keeping-secrets-in-1password-optional). |
-| `IMAP_X is missing or empty` / `must be …` | Configuration error; the message names the variable. |
-| `CA bundle … is not readable` | `brew install ca-certificates` (macOS) or `apt install ca-certificates` (Linux), or point `TP_IMAP_MCP_CA_FILE` at a PEM bundle. |
-| `TLS handshake … failed; the certificate is not trusted` | The server's certificate doesn't chain to your CA bundle (self-signed or private CA): add that CA to a bundle and set `TP_IMAP_MCP_CA_FILE`. |
-| `the TLS certificate … is not valid for host …` | `IMAP_<NAME>_HOST` doesn't match a name in the certificate — use the host name the certificate is issued for. |
-| `account "x" is read-only; set IMAP_X_READONLY=0 to allow changes` | Accounts are read-only by default; add `IMAP_X_READONLY=0` to `imap.env` and restart the client. |
-| `login failed: …` | Wrong credentials, or the provider requires an app password (or OAuth). |
-| `the OAuth refresh token was rejected (expired or revoked)` | Run `auth` again ([OAuth accounts](#oauth-accounts)) and replace the stored token. |
-| `cannot connect to host:port` | Host/port wrong, or port 993 blocked. Only implicit TLS (993-style) is supported, not STARTTLS. |
-| A negated search (`NOT FROM "x"`) returns nothing | Some servers (seen on Dovecot) mishandle `NOT` on header keys; search the positive form instead. |
-| A folder created elsewhere doesn't show up | The mailbox list is cached for an hour; ask for a refresh. |
-| `TP_IMAP_MCP_FILTERS: unknown filter "x"` | The name isn't built in or defined in `filters.zon`; fix the name or use `none`. |
-| `…/filters.zon: filter "x" rule N condition M: …` | Fix the named rule (exactly one of `.contains`/`.glob`/`.regex`, non-empty patterns, valid regex) and restart. |
-| `… is a special-use folder (\Sent) and cannot be renamed or deleted` | Working as intended (ADR 0021); reorganize system folders in your mail client. |
-| `the server supports neither MOVE nor UIDPLUS…` | The server cannot move messages safely; use `copy_messages` and delete the originals in your mail client. |
-| `connection lost while moving or copying messages…` | The outcome is unknown; search both folders before retrying. |
-| An email shows `[withheld by filter "…"]` | Working as intended. Disable for an account with `IMAP_<NAME>_FILTERS=none` (or keep just one, e.g. `IMAP_<NAME>_FILTERS=password_reset` to let the assistant read login codes), or narrow the rules in `filters.zon`. |
-| `… must be a number of bytes >= 1024` | Fix `TP_IMAP_MCP_MAX_BODY_BYTES` / `TP_IMAP_MCP_MAX_RESPONSE_BYTES`. |
+| Symptom                                                              | Cause / fix                                                                                                                                                                                                            |
+|----------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `imap.env: line N: …: command not found`                             | A value on line N contains a space or shell character and is not quoted — put it in single quotes.                                                                                                                     |
+| `imap.env: No such file or directory`                                | Wrong path in the `sh -c` command; GUI clients need absolute paths (no `~` or `$HOME`).                                                                                                                                |
+| Server fails to start only inside the MCP client                     | Use absolute paths for the env file and the binary; with 1Password, see [its troubleshooting](#keeping-secrets-in-1password-optional).                                                                                 |
+| `IMAP_X is missing or empty` / `must be …`                           | Configuration error; the message names the variable.                                                                                                                                                                   |
+| `CA bundle … is not readable`                                        | `brew install ca-certificates` (macOS) or `apt install ca-certificates` (Linux), or point `TP_IMAP_MCP_CA_FILE` at a PEM bundle.                                                                                       |
+| `TLS handshake … failed; the certificate is not trusted`             | The server's certificate doesn't chain to your CA bundle (self-signed or private CA): add that CA to a bundle and set `TP_IMAP_MCP_CA_FILE`.                                                                           |
+| `the TLS certificate … is not valid for host …`                      | `IMAP_<NAME>_HOST` doesn't match a name in the certificate — use the host name the certificate is issued for.                                                                                                          |
+| `account "x" is read-only; set IMAP_X_READONLY=0 to allow changes`   | Accounts are read-only by default; add `IMAP_X_READONLY=0` to `imap.env` and restart the client.                                                                                                                       |
+| `login failed: …`                                                    | Wrong credentials, or the provider requires an app password (or OAuth).                                                                                                                                                |
+| `the OAuth refresh token was rejected (expired or revoked)`          | Run `auth` again ([OAuth accounts](#oauth-accounts)) and replace the stored token.                                                                                                                                     |
+| `cannot connect to host:port`                                        | Host/port wrong, or port 993 blocked. Only implicit TLS (993-style) is supported, not STARTTLS.                                                                                                                        |
+| A negated search (`NOT FROM "x"`) returns nothing                    | Some servers (seen on Dovecot) mishandle `NOT` on header keys; search the positive form instead.                                                                                                                       |
+| A folder created elsewhere doesn't show up                           | The mailbox list is cached for an hour; ask for a refresh.                                                                                                                                                             |
+| `TP_IMAP_MCP_FILTERS: unknown filter "x"`                            | The name isn't built in or defined in `filters.zon`; fix the name or use `none`.                                                                                                                                       |
+| `…/filters.zon: filter "x" rule N condition M: …`                    | Fix the named rule (exactly one of `.contains`/`.glob`/`.regex`, non-empty patterns, valid regex) and restart.                                                                                                         |
+| `… is a special-use folder (\Sent) and cannot be renamed or deleted` | Working as intended (ADR 0021); reorganize system folders in your mail client.                                                                                                                                         |
+| `the server supports neither MOVE nor UIDPLUS…`                      | The server cannot move messages safely; use `copy_messages` and delete the originals in your mail client.                                                                                                              |
+| `connection lost while moving or copying messages…`                  | The outcome is unknown; search both folders before retrying.                                                                                                                                                           |
+| An email shows `[withheld by filter "…"]`                            | Working as intended. Disable for an account with `IMAP_<NAME>_FILTERS=none` (or keep just one, e.g. `IMAP_<NAME>_FILTERS=password_reset` to let the assistant read login codes), or narrow the rules in `filters.zon`. |
+| `… must be a number of bytes >= 1024`                                | Fix `TP_IMAP_MCP_MAX_BODY_BYTES` / `TP_IMAP_MCP_MAX_RESPONSE_BYTES`.                                                                                                                                                   |
 
-## Tech stack
-
-| Component | Technology |
-|---|---|
-| Language | Zig 0.17 (+ a small C shim) |
-| IMAP & MIME | libetpan 1.10 (Homebrew) |
-| TLS | OpenSSL (via libetpan) + Zig `std.crypto.Certificate` for host-name checks |
-| Cache | SQLite (macOS system `libsqlite3`) |
-| Protocol | MCP over stdio (JSON-RPC 2.0, hand-written) |
 
 <details>
 <summary>Project layout</summary>
@@ -657,6 +662,13 @@ CI (`.github/workflows/ci.yml`) runs the unit tests, an optimized build, and a s
 
 Decisions are recorded as ADRs in [`docs/adr/`](docs/adr/README.md); significant changes should add one. Work test-first: `zig build test` must stay green.
 
+## Colophon
+
+* Zig, because I'm learning it right now and I wanted to see what Claude will come up with.
+* Used Claude Code with [Superpowers plugin](https://github.com/obra/superpowers). I wanted to evaluate a small 
+  project against BMAD and Spec Kit.
+* I always use ADRs to keep track of decisions.
+
 ## License
 
-[MIT](LICENSE) — P. Osiczko
+[MIT](LICENSE)

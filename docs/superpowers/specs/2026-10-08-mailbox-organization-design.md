@@ -23,13 +23,13 @@ folders are labels).
 All take `account`. All are refused on read-only accounts
 (`account "X" is read-only`), except a call with `dry_run=true`.
 
-| Tool | Parameters | Effect |
-|---|---|---|
-| `create_mailbox` | `name` | `CREATE name`, then `SUBSCRIBE name`. The server creates missing parents (RFC 3501 §6.3.3). |
-| `rename_mailbox` | `name`, `new_name` | `RENAME`. A different parent moves the folder (e.g. `Projects/X` → `Archive/2025/X`). Subscriptions follow (§4.4). |
-| `delete_mailbox` | `name` | Only when the folder holds 0 messages and has no subfolders; otherwise an error naming what it holds. Then `UNSUBSCRIBE`. |
-| `move_messages` | `directory`, `destination`, exactly one of `uids` / `criteria`; optional `create_missing` (default false), `dry_run` | Moves the selected messages (§4.2). Refused when `directory` has the `\All` flag (`[Gmail]/All Mail`), dry runs included: `moving out of "[Gmail]/All Mail" (\All) is not supported; use copy_messages to add a label`. |
-| `copy_messages` | same as `move_messages` | `UID COPY` of the selected messages. On Gmail this adds a label. |
+| Tool             | Parameters                                                                                                           | Effect                                                                                                                                                                                                                  |
+|------------------|----------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `create_mailbox` | `name`                                                                                                               | `CREATE name`, then `SUBSCRIBE name`. The server creates missing parents (RFC 3501 §6.3.3).                                                                                                                             |
+| `rename_mailbox` | `name`, `new_name`                                                                                                   | `RENAME`. A different parent moves the folder (e.g. `Projects/X` → `Archive/2025/X`). Subscriptions follow (§4.4).                                                                                                      |
+| `delete_mailbox` | `name`                                                                                                               | Only when the folder holds 0 messages and has no subfolders; otherwise an error naming what it holds. Then `UNSUBSCRIBE`.                                                                                               |
+| `move_messages`  | `directory`, `destination`, exactly one of `uids` / `criteria`; optional `create_missing` (default false), `dry_run` | Moves the selected messages (§4.2). Refused when `directory` has the `\All` flag (`[Gmail]/All Mail`), dry runs included: `moving out of "[Gmail]/All Mail" (\All) is not supported; use copy_messages to add a label`. |
+| `copy_messages`  | same as `move_messages`                                                                                              | `UID COPY` of the selected messages. On Gmail this adds a label.                                                                                                                                                        |
 
 ### 2.1 Selecting messages (move/copy)
 
