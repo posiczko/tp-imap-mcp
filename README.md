@@ -632,7 +632,7 @@ zig build clean                                               # remove zig-out a
 
 The live checks print only PASS/FAIL lines and use a throwaway cache in `.zig-cache/`.
 
-CI (`.github/workflows/ci.yml`) runs the unit tests, an optimized build, and a startup smoke test on Apple Silicon macOS for every push and pull request, with Zig pinned to 0.17.0 (checksum-verified). The live checks are not run in CI because they need your mail credentials.
+CI (`.github/workflows/ci.yml`) runs the unit tests, an optimized build, and a startup smoke test on Apple Silicon macOS and on Ubuntu for every push and pull request, with Zig pinned to 0.17.0 (checksum-verified). The live checks are not run in CI because they need your mail credentials.
 
 </details>
 

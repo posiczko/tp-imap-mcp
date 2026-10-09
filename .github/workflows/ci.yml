@@ -1,5 +1,7 @@
-# Unit tests and an optimized build on Apple Silicon macOS.
-# The live IMAP checks (zig build itest) need 1Password credentials and stay
+# Unit tests, an optimized build and a startup smoke test on Apple Silicon
+# macOS (Homebrew libetpan, OpenSSL) and Ubuntu (distribution libetpan,
+# GnuTLS: the chain is verified in Zig, ADR 0016).
+# The live IMAP checks (zig build itest) need mail credentials and stay
 # manual; see README "Check the configuration".
 name: CI
 
@@ -19,9 +21,11 @@ env:
   ZIG_VERSION: 0.17.0
   # From https://ziglang.org/download/index.json (0.17.0, aarch64-macos).
   ZIG_SHA256: b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a
+  # From the same index (0.17.0, x86_64-linux).
+  ZIG_SHA256_LINUX: 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
 
 jobs:
-  test:
+  macos:
     runs-on: macos-15 # Apple Silicon
     timeout-minutes: 20
     steps:
@@ -37,6 +41,46 @@ jobs:
 
       - name: Install libetpan and CA certificates
         run: brew install libetpan ca-certificates
+
+      - name: Toolchain versions
+        run: |
+          zig version
+          pkg-config --modversion libetpan
+
+      - name: Unit tests
+        run: zig build test --summary all
+
+      - name: Optimized build
+        run: zig build -Doptimize=safe
+
+      - name: Smoke test (startup without config fails cleanly)
+        run: |
+          set +e
+          out=$(env -i ./zig-out/bin/tp_imap_mcp </dev/null 2>&1)
+          code=$?
+          set -e
+          echo "$out"
+          test "$code" -eq 1
+          echo "$out" | grep -q "IMAP_ACCOUNTS is missing or empty"
+
+  ubuntu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30 # the debug test suite takes ~10 minutes on Linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }} (pinned, checksum-verified)
+        run: |
+          tarball="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL -o "$RUNNER_TEMP/$tarball" "https://ziglang.org/download/${ZIG_VERSION}/${tarball}"
+          echo "${ZIG_SHA256_LINUX}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Install libetpan, SQLite and CA certificates
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libetpan-dev libsqlite3-dev ca-certificates pkg-config
 
       - name: Toolchain versions
         run: |
