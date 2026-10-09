@@ -8,9 +8,9 @@
 ![Status](https://img.shields.io/badge/Status-working-2EA043?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey?style=for-the-badge)
 
-**An MCP server that lets an AI assistant read and search several IMAP mailboxes — with credentials from 1Password, verified TLS, a local cache, and filters that keep sensitive mail out of the model.**
+**An MCP server that lets an AI assistant read and search several IMAP mailboxes — with verified TLS, a local cache, filters that keep sensitive mail out of the model, and optional 1Password credentials.**
 
-[Quick Start](#-quick-start) · [Running](#-running-the-server) · [Configuration](#-configuration) · [Tools](#-tools) · [Troubleshooting](#-troubleshooting) · [Roadmap](#-roadmap)
+[Quick Start](#-quick-start) · [Running](#-running-the-server) · [Configuration](#-configuration) · [1Password](#-keeping-secrets-in-1password-optional) · [Tools](#-tools) · [Troubleshooting](#-troubleshooting) · [Roadmap](#-roadmap)
 
 </div>
 
@@ -20,14 +20,14 @@
 
 > Mirror [vivier/imap-mcp-server](https://github.com/vivier/imap-mcp-server) in Zig, without implementing IMAP yourself, and make it safe to point at more than one real mailbox.
 
-tp-imap-mcp exposes IMAP mailboxes to MCP clients (Claude Code, Claude Desktop, …) over stdio. IMAP and MIME come from [libetpan](https://github.com/dinhvh/libetpan); everything else is a small Zig 0.17 codebase. Secrets never touch disk: `op run` injects them as environment variables at launch.
+tp-imap-mcp exposes IMAP mailboxes to MCP clients (Claude Code, Claude Desktop, …) over stdio. IMAP and MIME come from [libetpan](https://github.com/dinhvh/libetpan); everything else is a small Zig 0.17 codebase. Configuration is environment variables, loaded from a private env file at launch; optionally, `op run` resolves `op://` references from 1Password so secrets never touch disk.
 
 ## ✨ Features
 
 | Feature | Description |
 |---|---|
 | 📮 Multiple accounts | One server process, an `account` argument on every tool. |
-| 🔐 1Password credentials | Config is environment variables; values can be `op://` references resolved by `op run`. |
+| 🔐 Credentials | Environment variables from a private (`0600`) env file — or `op://` references resolved by `op run`, keeping secrets in 1Password. |
 | 🛡️ Verified TLS | Certificate chain checked against a CA bundle, SNI set, host name verified **before** the password is sent. |
 | 🗂️ Mail organization | Create, rename/move and delete folders; move or copy messages by UID or by search criteria, with dry runs and protected system folders. |
 | 👀 Read-only accounts | `IMAP_<NAME>_READONLY=1` refuses every tool that changes the mailbox; reads never mark mail as seen. |
@@ -39,15 +39,17 @@ tp-imap-mcp exposes IMAP mailboxes to MCP clients (Claude Code, Claude Desktop, 
 ## 🚀 Quick Start
 
 ```bash
-brew install zig libetpan ca-certificates 1password-cli
+brew install zig libetpan ca-certificates
 zig build -Doptimize=safe --prefix ~/.local                  # installs ~/.local/bin/tp_imap_mcp
 mkdir -p ~/.config/tp-imap-mcp
-cp imap.env.example ~/.config/tp-imap-mcp/imap.env    # edit: account names + op:// references
+cp imap.env.example ~/.config/tp-imap-mcp/imap.env    # edit: account names, hosts, logins, passwords
 chmod 600 ~/.config/tp-imap-mcp/imap.env
-ln -s ~/.config/tp-imap-mcp/imap.env imap.env         # so repo commands can say --env-file imap.env
-op run --env-file imap.env -- zig build itest -- <account>     # optional live check
-claude mcp add --scope user imap -- op run --env-file "$HOME/.config/tp-imap-mcp/imap.env" -- "$HOME/.local/bin/tp_imap_mcp"
+ln -s ~/.config/tp-imap-mcp/imap.env imap.env         # so repo commands can say ./imap.env
+sh -c 'set -a; . ./imap.env; exec zig build itest -- <account>'     # optional live check
+claude mcp add --scope user imap -- sh -c 'set -a; . "$HOME/.config/tp-imap-mcp/imap.env"; exec "$HOME/.local/bin/tp_imap_mcp"'
 ```
+
+The server reads its configuration from environment variables; `sh -c 'set -a; . <file>; exec …'` loads them from `imap.env` and starts the command. It works the same from bash, zsh or fish. To keep passwords out of that file, store them in 1Password instead: see [Keeping secrets in 1Password](#-keeping-secrets-in-1password-optional).
 
 The full walkthrough follows.
 
@@ -61,8 +63,8 @@ The full walkthrough follows.
 | Zig **0.17.0** | `brew install zig` | `zig version` → `0.17.0` |
 | libetpan (IMAP/MIME) | `brew install libetpan` | `pkg-config --modversion libetpan` → `1.10.x` |
 | CA certificates (TLS) | `brew install ca-certificates` | `ls /opt/homebrew/etc/ca-certificates/cert.pem` |
-| 1Password CLI | `brew install 1password-cli` | `op --version` |
 | SQLite | ships with macOS | — |
+| 1Password CLI *(optional)* | `brew install 1password-cli` | `op --version` — only for [secrets in 1Password](#-keeping-secrets-in-1password-optional) |
 
 ### 2. Build
 
@@ -74,24 +76,7 @@ zig build test                                # optional: unit tests (offline)
 
 `--prefix ~/.local` installs the server as `~/.local/bin/tp_imap_mcp`, outside the repository, so `zig build clean`, `git clean` or a fresh clone never removes the binary your MCP client runs. Without `--prefix` the binary stays in `zig-out/bin/tp_imap_mcp`, which also works if you register that path instead. MCP clients launch it by absolute path, so after reinstalling you only need to restart or reconnect the client.
 
-### 3. Store credentials in 1Password
-
-Create one item per IMAP account (any item type works; a *Login* or *Server* item is typical) with fields for the user name and password. Find the exact field labels — they become part of the `op://` reference:
-
-```bash
-op item get "Work IMAP" --vault Private --format json | jq -r '.fields[] | "\(.label)\t\(.type)"'
-```
-
-A reference is `op://<vault>/<item>/<field>`, e.g. `op://Private/Work IMAP/password`. Check that one resolves (prints the value, so mind your screen):
-
-```bash
-op read "op://Private/Work IMAP/username"
-```
-
-> [!TIP]
-> The host is not secret; you can write it in plain text instead of storing it in 1Password.
-
-### 4. Write `imap.env`
+### 3. Write `imap.env`
 
 Keep it in the per-user config directory, next to `filters.zon` and `organize.md`:
 
@@ -99,11 +84,14 @@ Keep it in the per-user config directory, next to `filters.zon` and `organize.md
 mkdir -p ~/.config/tp-imap-mcp
 cp imap.env.example ~/.config/tp-imap-mcp/imap.env
 chmod 600 ~/.config/tp-imap-mcp/imap.env
-ln -s ~/.config/tp-imap-mcp/imap.env imap.env    # optional: lets the repo commands below use --env-file imap.env
+ln -s ~/.config/tp-imap-mcp/imap.env imap.env    # optional: lets the repo commands below use ./imap.env
 ```
 
 > [!NOTE]
-> Why not in the repository? The MCP client starts the server from this file on every launch. In `~/.config` it survives `git clean -fdx`, a fresh clone, or deleting the checkout. The file holds only account names and `op://` references (no secrets), but mode `600` keeps it private anyway. A plain `imap.env` in the repository root also works (it is git-ignored); then use that path when registering the server.
+> Why not in the repository? The MCP client starts the server from this file on every launch. In `~/.config` it survives `git clean -fdx`, a fresh clone, or deleting the checkout. A plain `imap.env` in the repository root also works (it is git-ignored); then use that path when registering the server.
+
+> [!WARNING]
+> This file holds your passwords in plain text. Keep it mode `600`, out of backups you share, and out of the repository. If that is not acceptable, put `op://` references in it instead and keep the secrets in 1Password: [Keeping secrets in 1Password](#-keeping-secrets-in-1password-optional).
 
 The example defines three accounts: a plain IMAP server, Gmail with an app
 password and a Google account with XOAUTH2. Keep only the blocks you use, and
@@ -113,33 +101,33 @@ list exactly those names in `IMAP_ACCOUNTS`. A minimal file looks like this:
 IMAP_ACCOUNTS=work,personal
 
 IMAP_WORK_HOST=imap.example.org
-IMAP_WORK_LOGIN=op://Private/Work IMAP/username
-IMAP_WORK_PASSWORD=op://Private/Work IMAP/password
+IMAP_WORK_LOGIN=me@example.org
+IMAP_WORK_PASSWORD='correct horse battery staple'
 
 IMAP_PERSONAL_HOST=imap.fastmail.com
-IMAP_PERSONAL_LOGIN=op://Private/Fastmail/username
-IMAP_PERSONAL_PASSWORD=op://Private/Fastmail/app password
+IMAP_PERSONAL_LOGIN=me@fastmail.com
+IMAP_PERSONAL_PASSWORD='app-password-here'
 IMAP_PERSONAL_READONLY=1
 ```
 
 - One `IMAP_<NAME>_*` block per name in `IMAP_ACCOUNTS`; `<NAME>` is upper-cased.
-- Spaces inside `op://` references are fine in an env file — don't quote them.
+- One `KEY=value` per line, no spaces around `=`. Put a value in **single quotes** if it contains spaces or shell characters such as `$`, `"`, `\`, `#`, `&`, `;`, `|` or a backtick. (`op run` reads the same file and strips the quotes too.)
 - Gmail / Outlook: use an **app password**, or OAuth 2.0 (XOAUTH2) where app passwords are disabled — see [OAuth accounts](#oauth-accounts) and the [Gmail XOAUTH2 runbook](docs/runbooks/gmail-xoauth2.md).
 - See [Configuration](#-configuration) for every variable.
 
-### 5. Check the configuration
+### 4. Check the configuration
 
 Start the server once with no input; it validates everything, prints one line to stderr, and exits:
 
 ```bash
-op run --env-file imap.env -- ./zig-out/bin/tp_imap_mcp </dev/null
+sh -c 'set -a; . ./imap.env; exec ./zig-out/bin/tp_imap_mcp' </dev/null
 # tp-imap-mcp: serving 2 account(s) on stdio; cache: /Users/you/.cache/tp-imap-mcp
 ```
 
 Then run the live read-only checks against each account (they print only PASS/FAIL, never message content, and use a throwaway cache):
 
 ```bash
-op run --env-file imap.env -- zig build itest -- work
+sh -c 'set -a; . ./imap.env; exec zig build itest -- work'
 # … about 30 PASS lines (more with --write and --organize) …
 # 0 failure(s)
 ```
@@ -147,18 +135,17 @@ op run --env-file imap.env -- zig build itest -- work
 `--organize` adds 20 PASS lines. It also checks the folder and move/copy tools. It creates two folders named `tp-imap-mcp-itest-<random>`, appends one test message, moves, copies and renames, and removes everything again (it never touches other folders):
 
 ```bash
-op run --env-file imap.env -- zig build itest -- work --organize
+sh -c 'set -a; . ./imap.env; exec zig build itest -- work --organize'
 ```
 
-### 6. Register with your MCP client
+### 5. Register with your MCP client
 
 <details open>
 <summary><b>Claude Code</b></summary>
 
 ```bash
 claude mcp add --scope user imap -- \
-  op run --env-file "$HOME/.config/tp-imap-mcp/imap.env" -- \
-  "$HOME/.local/bin/tp_imap_mcp"
+  sh -c 'set -a; . "$HOME/.config/tp-imap-mcp/imap.env"; exec "$HOME/.local/bin/tp_imap_mcp"'
 
 claude mcp list          # should show "imap" as connected
 ```
@@ -176,15 +163,14 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 {
   "mcpServers": {
     "imap": {
-      "command": "/opt/homebrew/bin/op",
-      "args": ["run", "--env-file", "/Users/you/.config/tp-imap-mcp/imap.env", "--",
-               "/Users/you/.local/bin/tp_imap_mcp"]
+      "command": "/bin/sh",
+      "args": ["-c", "set -a; . /Users/you/.config/tp-imap-mcp/imap.env; exec /Users/you/.local/bin/tp_imap_mcp"]
     }
   }
 }
 ```
 
-Use absolute paths everywhere — GUI apps don't inherit your shell's `PATH`. Restart Claude Desktop.
+Use absolute paths everywhere — GUI apps don't inherit your shell's `PATH` or `$HOME` expansions. Restart Claude Desktop.
 
 </details>
 
@@ -194,22 +180,15 @@ Use absolute paths everywhere — GUI apps don't inherit your shell's `PATH`. Re
 The server speaks MCP over **stdio** (newline-delimited JSON-RPC 2.0). Configure the client to run:
 
 ```
-command: op
-args:    run --env-file /Users/you/.config/tp-imap-mcp/imap.env -- /Users/you/.local/bin/tp_imap_mcp
+command: /bin/sh
+args:    -c "set -a; . /Users/you/.config/tp-imap-mcp/imap.env; exec /Users/you/.local/bin/tp_imap_mcp"
 ```
+
+If the client lets you set environment variables for a server directly, you can put the `IMAP_*` variables there instead and run `/Users/you/.local/bin/tp_imap_mcp` with no wrapper.
 
 </details>
 
-### 7. Let 1Password unlock non-interactively
-
-The MCP client starts the server in the background, so `op run` must be able to read secrets without a terminal prompt:
-
-- **Desktop app integration (recommended for a personal Mac):** 1Password app → *Settings → Developer → Integrate with 1Password CLI*. `op` then asks the app, which can unlock with Touch ID when the client starts the server.
-- **Service account (headless/automation):** create a service account with read access to the vault and expose `OP_SERVICE_ACCOUNT_TOKEN` to the client's environment.
-
-If neither is set up, the client will report the server as failed to start; see [Troubleshooting](#-troubleshooting).
-
-### 8. Try it
+### 6. Try it
 
 Ask your assistant things like:
 
@@ -228,23 +207,24 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_accounts"}}' \
   '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"mailboxes_status","arguments":{"account":"work","directory":"INBOX"}}}' \
-| op run --env-file imap.env -- ./zig-out/bin/tp_imap_mcp
+| sh -c 'set -a; . ./imap.env; exec ./zig-out/bin/tp_imap_mcp'
 ```
 
 Or use the [MCP Inspector](https://github.com/modelcontextprotocol/inspector) (needs Node.js):
 
 ```bash
-npx @modelcontextprotocol/inspector op run --env-file "$PWD/imap.env" -- "$PWD/zig-out/bin/tp_imap_mcp"
+npx @modelcontextprotocol/inspector sh -c 'set -a; . ./imap.env; exec ./zig-out/bin/tp_imap_mcp'
 ```
 
 </details>
 
-### 9. Day-to-day operation
+### 7. Day-to-day operation
 
 | Task | How |
 |---|---|
 | Update after code changes | `zig build -Doptimize=safe --prefix ~/.local`, then restart / reconnect the client (`/mcp` in Claude Code) |
 | Add an account | Add its name to `IMAP_ACCOUNTS` and an `IMAP_<NAME>_*` block; restart the client |
+| Change a password | Edit `imap.env` (or the 1Password item); restart the client |
 | Make an account read-only | `IMAP_<NAME>_READONLY=1`; restart |
 | See new folders immediately | Ask the assistant to list mailboxes with refresh, or wait for the TTL (1 h) |
 | Clear cached data | Ask the assistant to clear the cache, or `rm ~/.cache/tp-imap-mcp/<account>.sqlite3*` |
@@ -254,19 +234,19 @@ npx @modelcontextprotocol/inspector op run --env-file "$PWD/imap.env" -- "$PWD/z
 
 ## ⚙️ Configuration
 
-All configuration is environment variables, usually from `~/.config/tp-imap-mcp/imap.env` via `op run --env-file` (see [Write `imap.env`](#4-write-imapenv)).
+All configuration is environment variables, usually loaded from `~/.config/tp-imap-mcp/imap.env` (see [Write `imap.env`](#3-write-imapenv)). Any value may instead be an `op://` reference when you launch through `op run` ([1Password](#-keeping-secrets-in-1password-optional)).
 
 | Variable | Required | Meaning |
 |---|---|---|
 | `IMAP_ACCOUNTS` | yes | Comma-separated account names, e.g. `work,personal` (`[A-Za-z0-9_]+`) |
 | `IMAP_<NAME>_HOST` | yes | IMAP server host name |
-| `IMAP_<NAME>_LOGIN` | yes | Login (may be `op://…`) |
-| `IMAP_<NAME>_PASSWORD` | password auth | Password (should be `op://…`); must not be set with `AUTH=oauth2` |
+| `IMAP_<NAME>_LOGIN` | yes | Login |
+| `IMAP_<NAME>_PASSWORD` | password auth | Password; must not be set with `AUTH=oauth2` |
 | `IMAP_<NAME>_AUTH` | no | `password` (default) or `oauth2` — see [OAuth accounts](#oauth-accounts) |
 | `IMAP_<NAME>_OAUTH_PROVIDER` | oauth2 | `google`, `microsoft`, or `custom` |
 | `IMAP_<NAME>_OAUTH_CLIENT_ID` | oauth2 | OAuth client ID |
 | `IMAP_<NAME>_OAUTH_CLIENT_SECRET` | google | OAuth client secret (optional for Microsoft) |
-| `IMAP_<NAME>_OAUTH_REFRESH_TOKEN` | oauth2 | From `tp_imap_mcp auth <account>` (store in 1Password) |
+| `IMAP_<NAME>_OAUTH_REFRESH_TOKEN` | oauth2 | From `tp_imap_mcp auth <account>` |
 | `IMAP_<NAME>_OAUTH_TENANT` | no | Microsoft tenant (default `common`) |
 | `IMAP_<NAME>_OAUTH_AUTH_URL`, `_TOKEN_URL`, `_SCOPE` | custom | Endpoints (https) and scopes for a custom provider |
 | `IMAP_<NAME>_PORT` | no | Default `993` (implicit TLS) |
@@ -292,8 +272,8 @@ All configuration is environment variables, usually from `~/.config/tp-imap-mcp/
 ```bash
 IMAP_ACCOUNTS=work
 IMAP_WORK_HOST=imap.example.org
-IMAP_WORK_LOGIN=op://Private/Work IMAP/username
-IMAP_WORK_PASSWORD=op://Private/Work IMAP/password
+IMAP_WORK_LOGIN=me@example.org
+IMAP_WORK_PASSWORD='correct horse battery staple'
 # IMAP_WORK_READONLY=1
 ```
 
@@ -334,11 +314,18 @@ IMAP_WORK_PASSWORD=op://Private/Work IMAP/password
 Microsoft 365 / Outlook.com (where IMAP passwords are usually disabled) and Gmail can use OAuth 2.0 (XOAUTH2) instead of a password:
 
 1. Register an OAuth app with the provider — step by step for Gmail: [docs/runbooks/gmail-xoauth2.md](docs/runbooks/gmail-xoauth2.md). Microsoft: an Entra ID app ("Mobile and desktop applications", redirect `http://127.0.0.1`, permissions `IMAP.AccessAsUser.All` + `offline_access`).
-2. Put `IMAP_<NAME>_AUTH=oauth2`, the provider, and the client ID/secret (as `op://` references) in `imap.env`.
-3. Run `op run --env-file imap.env -- tp_imap_mcp auth <account>`: your browser opens, you consent, and the refresh token is printed once. Store it in 1Password and reference it as `IMAP_<NAME>_OAUTH_REFRESH_TOKEN`.
+2. Put `IMAP_<NAME>_AUTH=oauth2`, the provider, and the client ID and secret in `imap.env`.
+3. Run `tp_imap_mcp auth <account>` (below): your browser opens, you consent, and the refresh token is printed once on stdout. Add it to `imap.env` as `IMAP_<NAME>_OAUTH_REFRESH_TOKEN`.
+
+```bash
+sh -c 'set -a; . ./imap.env; exec ~/.local/bin/tp_imap_mcp auth work' | pbcopy   # token → clipboard
+# then paste it into imap.env:  IMAP_WORK_OAUTH_REFRESH_TOKEN=<paste>
+```
+
+Only the token goes to stdout (instructions go to the terminal), so `| pbcopy` copies it without showing it. Run `auth` again whenever the token expires.
 
 > [!NOTE]
-> Each OAuth account needs its own refresh token, and so its own `auth` run. In the browser, choose the account that matches `IMAP_<NAME>_LOGIN`. Several accounts may share one OAuth client. While an account has no refresh token, `op run` fails on its reference and the server refuses to start, so keep the line commented out until step 3. Never set `IMAP_<NAME>_PASSWORD` on an OAuth account.
+> Each OAuth account needs its own refresh token, and so its own `auth` run. In the browser, choose the account that matches `IMAP_<NAME>_LOGIN`. Several accounts may share one OAuth client. The server refuses to start while an OAuth account has no refresh token (`auth` itself does not need one). Never set `IMAP_<NAME>_PASSWORD` on an OAuth account.
 
 A Google Workspace account next to a personal Gmail account that uses an app password:
 
@@ -349,24 +336,69 @@ IMAP_WORK_HOST=imap.gmail.com
 IMAP_WORK_LOGIN=you@work.example
 IMAP_WORK_AUTH=oauth2
 IMAP_WORK_OAUTH_PROVIDER=google
-IMAP_WORK_OAUTH_CLIENT_ID=op://Work/Gmail OAuth/client id
-IMAP_WORK_OAUTH_CLIENT_SECRET=op://Work/Gmail OAuth/client secret
-IMAP_WORK_OAUTH_REFRESH_TOKEN=op://Work/Gmail OAuth/refresh token
+IMAP_WORK_OAUTH_CLIENT_ID=1234-abc.apps.googleusercontent.com
+IMAP_WORK_OAUTH_CLIENT_SECRET=GOCSPX-…
+IMAP_WORK_OAUTH_REFRESH_TOKEN=1//0g…
 IMAP_WORK_DRAFTS=[Gmail]/Drafts
 
 IMAP_GMAIL_HOST=imap.gmail.com
 IMAP_GMAIL_LOGIN=you@gmail.com
-IMAP_GMAIL_PASSWORD=op://Private/Gmail App Password/password
+IMAP_GMAIL_PASSWORD='abcd efgh ijkl mnop'
 IMAP_GMAIL_DRAFTS=[Gmail]/Drafts
-```
-
-```bash
-op run --env-file imap.env -- tp_imap_mcp auth work   # once, then whenever the token expires
 ```
 
 For Microsoft 365, set `IMAP_<NAME>_HOST=outlook.office365.com`, `IMAP_<NAME>_OAUTH_PROVIDER=microsoft` and, optionally, `IMAP_<NAME>_OAUTH_TENANT` (default `common`). The client secret is optional for Microsoft.
 
 Access tokens are refreshed automatically and kept only in memory. When a refresh token expires (Microsoft ~90 days; Google apps in *Testing* 7 days), tools report it and tell you to run `auth` again.
+
+## 🔑 Keeping secrets in 1Password (optional)
+
+Instead of writing passwords and tokens into `imap.env`, write [1Password secret references](https://developer.1password.com/docs/cli/secret-references/) (`op://<vault>/<item>/<field>`) and start every command through `op run`, which resolves them into the environment just before the process starts. The file then holds no secrets, and nothing secret is written to disk.
+
+**1. Install the CLI and let it unlock without a terminal.** The MCP client starts the server in the background, so `op` must read secrets without a prompt:
+
+```bash
+brew install 1password-cli
+```
+
+- **Desktop app integration (recommended for a personal Mac):** 1Password app → *Settings → Developer → Integrate with 1Password CLI*. `op` then asks the app, which can unlock with Touch ID when the client starts the server.
+- **Service account (headless/automation):** create a service account with read access to the vault and expose `OP_SERVICE_ACCOUNT_TOKEN` to the client's environment.
+
+**2. Store the credentials.** Create one item per IMAP account (a *Login* or *Server* item is typical) with fields for the user name and password. Find the exact field labels — they become part of the reference:
+
+```bash
+op item get "Work IMAP" --vault Private --format json | jq -r '.fields[] | "\(.label)\t\(.type)"'
+op read "op://Private/Work IMAP/username"     # check one resolves (prints the value — mind your screen)
+```
+
+**3. Put references in `imap.env`.** Plain values and references can be mixed; the host, for example, is not secret. Quote references that contain spaces, as with any value:
+
+```bash
+IMAP_ACCOUNTS=work
+IMAP_WORK_HOST=imap.example.org
+IMAP_WORK_LOGIN='op://Private/Work IMAP/username'
+IMAP_WORK_PASSWORD='op://Private/Work IMAP/password'
+```
+
+**4. Run commands through `op run`.** Wherever this README runs `sh -c 'set -a; . FILE; exec COMMAND'`, run `op run --env-file FILE -- COMMAND` instead:
+
+| Task | With 1Password |
+|---|---|
+| Check the configuration | `op run --env-file imap.env -- ./zig-out/bin/tp_imap_mcp </dev/null` |
+| Live checks | `op run --env-file imap.env -- zig build itest -- work` |
+| Register with Claude Code | `claude mcp add --scope user imap -- op run --env-file "$HOME/.config/tp-imap-mcp/imap.env" -- "$HOME/.local/bin/tp_imap_mcp"` |
+| Claude Desktop / other clients | `"command": "/opt/homebrew/bin/op"`, `"args": ["run", "--env-file", "/Users/you/.config/tp-imap-mcp/imap.env", "--", "/Users/you/.local/bin/tp_imap_mcp"]` |
+| OAuth `auth` | `op run --env-file imap.env -- ~/.local/bin/tp_imap_mcp auth work \| pbcopy` |
+
+**5. OAuth refresh tokens.** Paste the token from `auth` into a password field of the item in the **1Password app**, and reference it as `IMAP_<NAME>_OAUTH_REFRESH_TOKEN='op://…/refresh token'`. Don't pass it to `op item edit` on the command line: it would stay in your shell history and be visible to other processes. `op run` fails on a reference to a field that does not exist yet, so keep that line commented out until the field exists.
+
+| Symptom | Cause / fix |
+|---|---|
+| `[ERROR] … item '…' does not have a field '…'` | Wrong field label in an `op://` reference — list labels with the `op item get … \| jq` command above. |
+| `could not find item … in vault …` / `isn't a vault in this account` | Wrong vault name, or you're signed in to a different 1Password account: `op account list`, add `--account <shorthand>` after `op run`. |
+| `invalid character in secret reference` | Two variables ran together on one line (missing newline) — keep one `KEY=value` per line. |
+| `error initializing client: authorization timeout` | Approve the 1Password prompt (Touch ID) in time, or unlock 1Password first. |
+| Server fails to start only inside the MCP client | `op` can't unlock non-interactively — see step 1. Use absolute paths for `op` and the binary in GUI clients. |
 
 ## 🧰 Tools
 
@@ -443,7 +475,7 @@ Write your own instructions in `~/.config/tp-imap-mcp/organize.md`, or `organize
 ## 🔒 Security model
 
 - **TLS:** the server certificate must chain to the CA bundle and match the configured host; otherwise the connection is refused and no credentials are sent.
-- **Secrets:** only in memory, from the environment `op run` provides; never logged or returned by tools. The server zeroes its own copy on exit; the environment copy lives as long as the process.
+- **Secrets:** the server reads them from its environment and never logs or returns them. In `imap.env` they are plain text on disk (mode `0600`); with [1Password references](#-keeping-secrets-in-1password-optional) the file holds none and `op run` passes them only to the process. In memory, the server wipes token buffers and its own copies when done; the environment copy lives as long as the process.
 - **Command injection:** search criteria cannot contain CR/LF/NUL; UIDs, keywords, and header names are validated.
 - **Read-only accounts:** write tools refuse before contacting the server (dry runs of `move_messages` / `copy_messages` / `apply_organization` are allowed).
 - **Organizing:** see [Organizing mail](#organizing-mail): previews for bulk moves, no plain `EXPUNGE`, protected system folders, and no automatic retry of a folder or move/copy command after a dropped connection.
@@ -456,16 +488,15 @@ Write your own instructions in `~/.config/tp-imap-mcp/organize.md`, or `organize
 
 | Symptom | Cause / fix |
 |---|---|
-| `[ERROR] … item '…' does not have a field '…'` | Wrong field label in an `op://` reference — list labels with the `op item get … \| jq` command in step 3. |
-| `could not find item … in vault …` | Wrong vault name, or you're signed in to a different 1Password account: `op account list`, add `--account <shorthand>` after `op run`. |
-| `invalid character in secret reference` | Two variables ran together on one line (missing space/newline) — keep one `KEY=value` per line in `imap.env`. |
-| Server fails to start only inside the MCP client | `op` can't unlock non-interactively — see step 7. Use absolute paths for `op` and the binary. |
+| `imap.env: line N: …: command not found` | A value on line N contains a space or shell character and is not quoted — put it in single quotes. |
+| `imap.env: No such file or directory` | Wrong path in the `sh -c` command; GUI clients need absolute paths (no `~` or `$HOME`). |
+| Server fails to start only inside the MCP client | Use absolute paths for the env file and the binary; with 1Password, see [its troubleshooting](#-keeping-secrets-in-1password-optional). |
 | `IMAP_X is missing or empty` / `must be …` | Configuration error; the message names the variable. |
 | `CA bundle … is not readable` | `brew install ca-certificates`, or point `TP_IMAP_MCP_CA_FILE` at a PEM bundle. |
 | `TLS handshake … failed; the certificate is not trusted` | The server's certificate doesn't chain to your CA bundle (self-signed or private CA): add that CA to a bundle and set `TP_IMAP_MCP_CA_FILE`. |
 | `the TLS certificate … is not valid for host …` | `IMAP_<NAME>_HOST` doesn't match a name in the certificate — use the host name the certificate is issued for. |
 | `login failed: …` | Wrong credentials, or the provider requires an app password (or OAuth). |
-| `the OAuth refresh token was rejected (expired or revoked)` | Run `op run --env-file imap.env -- tp_imap_mcp auth <account>` and store the new token. |
+| `the OAuth refresh token was rejected (expired or revoked)` | Run `auth` again ([OAuth accounts](#oauth-accounts)) and replace the stored token. |
 | `cannot connect to host:port` | Host/port wrong, or port 993 blocked. Only implicit TLS (993-style) is supported, not STARTTLS. |
 | A negated search (`NOT FROM "x"`) returns nothing | Some servers (seen on Dovecot) mishandle `NOT` on header keys; search the positive form instead. |
 | A folder created elsewhere doesn't show up | The mailbox list is cached for an hour; ask for a refresh. |
@@ -520,21 +551,21 @@ docs/
 <summary>Development</summary>
 
 ```bash
-zig build test                                        # unit tests (offline)
-op run --env-file imap.env -- zig build itest -- work # live read-only checks against an account
-zig build clean                                       # remove zig-out and .zig-cache (the ~/.local install is untouched)
+zig build test                                                # unit tests (offline)
+sh -c 'set -a; . ./imap.env; exec zig build itest -- work'   # live read-only checks against an account
+zig build clean                                               # remove zig-out and .zig-cache (the ~/.local install is untouched)
 ```
 
 The live checks print only PASS/FAIL lines and use a throwaway cache in `.zig-cache/`.
 
-CI (`.github/workflows/ci.yml`) runs the unit tests, an optimized build, and a startup smoke test on Apple Silicon macOS for every push and pull request, with Zig pinned to 0.17.0 (checksum-verified). The live checks are not run in CI because they need your 1Password credentials.
+CI (`.github/workflows/ci.yml`) runs the unit tests, an optimized build, and a startup smoke test on Apple Silicon macOS for every push and pull request, with Zig pinned to 0.17.0 (checksum-verified). The live checks are not run in CI because they need your mail credentials.
 
 </details>
 
 ## 🗺 Roadmap
 
 - [x] All tools of the reference server, multi-account
-- [x] 1Password-injected credentials
+- [x] Credentials from environment variables, optionally from 1Password
 - [x] Verified TLS (chain, SNI, host name)
 - [x] Read-only accounts
 - [x] SQLite cache for mailbox list and headers/sizes (XDG)
