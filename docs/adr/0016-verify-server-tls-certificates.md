@@ -55,3 +55,43 @@ neither read nor freed.
   certificates OpenSSL already verified, so input is well-formed by
   construction.
 - Supersedes nothing; complements ADR 0008.
+
+## Amendment (2026-10-09): Linux, where libetpan uses GnuTLS
+
+Debian/Ubuntu build libetpan (1.9.4 on Ubuntu 26.04) against GnuTLS, whose
+backend does not implement `mailstream_ssl_set_server_certicate` (it returns
+-1 with "not implemented", in 1.9.4 and 1.10 alike). The handshake then
+completes without any chain check. Before this amendment the shim treated the
+-1 as a TLS failure, so Linux failed closed: every connection refused.
+
+Options considered: build libetpan from source against OpenSSL; verify the
+chain in Zig on every platform; verify in Zig only where libetpan cannot.
+Chosen (user's call): the last.
+
+- `tls_setup` records that the backend could not take the CA file instead of
+  failing; `tpi_chain_verified` reports it and `tpi_peer_chain` returns the
+  server's chain (DER, leaf first).
+- `Session.connect` then verifies the chain in Zig (`src/imap/trust.zig`)
+  before the host-name check and before any credential: each certificate
+  valid now and signed by the next, every issuer a CA (basicConstraints cA,
+  read from the DER because `std.crypto.Certificate.Parsed` neither exposes
+  nor checks it), ending at a certificate signed by one in the bundle. The
+  bundle is read once per process (`Trust`).
+- The default bundle is per OS: `/opt/homebrew/etc/ca-certificates/cert.pem`
+  on macOS, `/etc/ssl/certs/ca-certificates.crt` elsewhere.
+- macOS (OpenSSL) is unchanged: libetpan still verifies the chain.
+
+Consequences:
+
+- Verified live on Ubuntu 26.04 with Gmail and dummy credentials: with the
+  system bundle the connection reaches LOGIN ("Invalid credentials"); with a
+  bundle holding one unrelated root it stops at "certificate is not
+  trusted", before LOGIN.
+- No revocation (CRL/OCSP) and no name or policy constraints, as with
+  `std.http`'s TLS client. OpenSSL on macOS does more.
+- `Certificate.parse` panics on malformed DER. The chain comes from GnuTLS,
+  which has already imported each certificate as X.509 and re-exported it,
+  so the input is well formed by construction, as on macOS.
+- Tests use Gmail's public chain at a fixed time. Not covered by a test: a
+  chain whose intermediate is not a CA (needs a forged chain, i.e. generated
+  keys); `isCa` itself is tested.

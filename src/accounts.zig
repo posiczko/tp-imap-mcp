@@ -29,6 +29,8 @@ pub const Registry = struct {
     io: std.Io,
     /// HTTPS client for OAuth token requests, created on first use.
     token_client: ?token.Client = null,
+    /// CA bundle for TLS backends that cannot verify chains (GnuTLS).
+    ca: imap.trust.Trust,
     /// Test seam: let the token client use plain http to 127.0.0.1.
     allow_insecure_token_loopback: bool = false,
     accounts: []config.Account,
@@ -66,7 +68,7 @@ pub const Registry = struct {
         if (active_filters.len != accounts.len) return error.FilterCountMismatch;
         const slots = try gpa.alloc(Slot, accounts.len);
         @memset(slots, .{});
-        return .{ .gpa = gpa, .io = io, .accounts = accounts, .settings = settings, .slots = slots, .active_filters = active_filters };
+        return .{ .gpa = gpa, .io = io, .accounts = accounts, .settings = settings, .slots = slots, .active_filters = active_filters, .ca = .{ .gpa = gpa, .io = io, .ca_file = settings.ca_file } };
     }
 
     pub fn deinit(self: *Registry) void {
@@ -83,6 +85,7 @@ pub const Registry = struct {
         }
         self.gpa.free(self.slots);
         if (self.token_client) |*tc| tc.deinit();
+        self.ca.deinit();
         self.* = undefined;
     }
 
@@ -222,7 +225,7 @@ pub const Registry = struct {
             if (s.noop()) |_| return s else |_| self.drop(idx);
         }
         const a = &self.accounts[idx];
-        var s = Session.connect(a.host, a.port, timeout_sec, self.settings.ca_file) catch |err| {
+        var s = Session.connect(a.host, a.port, timeout_sec, self.settings.ca_file, &self.ca) catch |err| {
             switch (err) {
                 error.TlsFailed => self.setDiag("account \"{s}\": TLS handshake with {s}:{d} failed; the certificate is not trusted by {s}", .{ a.name, a.host, a.port, self.settings.ca_file }),
                 error.HostnameMismatch => self.setDiag("account \"{s}\": the TLS certificate of {s}:{d} is not valid for host {s}", .{ a.name, a.host, a.port, a.host }),

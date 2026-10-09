@@ -147,8 +147,12 @@ pub const Log = struct {
     }
 
     fn rotateIfFull(self: *Log) void {
-        var st: std.c.Stat = undefined;
-        if (std.c.stat(self.path, &st) != 0 or st.size < max_bytes) return;
+        // Size via lseek: std.c.stat is not declared for Linux glibc.
+        const fd = std.c.open(self.path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, @as(std.c.mode_t, 0));
+        if (fd < 0) return;
+        const size = std.c.lseek(fd, 0, std.c.SEEK.END);
+        _ = std.c.close(fd);
+        if (size < max_bytes) return;
         var from_buf: [std.fs.max_path_bytes]u8 = undefined;
         var to_buf: [std.fs.max_path_bytes]u8 = undefined;
         var i: usize = keep;
@@ -265,8 +269,6 @@ test "Log appends lines and rotates at max_bytes" {
     const fresh = try tmp.dir.readFileAlloc(testing.io, "audit.log", testing.allocator, .limited(1024));
     defer testing.allocator.free(fresh);
     try testing.expectEqualStrings("three\n", fresh);
-    var st: std.c.Stat = undefined;
-    const rotated = try std.mem.printSentinel(&path_buf, "{s}/audit.log.1", .{dir_buf[0..dir_len]}, 0);
-    try testing.expectEqual(0, std.c.stat(rotated, &st));
-    try testing.expectEqual(0o600, st.mode & 0o777);
+    const st = try tmp.dir.statFile(testing.io, "audit.log.1", .{});
+    try testing.expectEqual(0o600, @backingInt(st.permissions) & 0o777);
 }

@@ -8,6 +8,7 @@
 
 struct tpi_session {
   mailimap *imap;
+  int chain_verified; /* libetpan checked the chain against the CA file */
   int caps;       /* TPI_CAP_* mask */
   int caps_known; /* caps fetched on this connection */
 };
@@ -60,15 +61,18 @@ void tpi_free(tpi_session *s) {
 struct tls_options {
   const char *host;
   const char *ca_file;
-  int ca_failed;
+  int ca_unsupported;
 };
 
-/* Runs before the handshake: SNI plus chain verification (SSL_VERIFY_PEER). */
+/* Runs before the handshake: SNI plus chain verification (SSL_VERIFY_PEER).
+ * libetpan's GnuTLS backend does not implement CA files (it returns -1):
+ * the handshake then completes unverified and the caller must verify the
+ * chain itself (tpi_chain_verified, tpi_peer_chain) before sending anything. */
 static void tls_setup(struct mailstream_ssl_context *ctx, void *data) {
   struct tls_options *o = data;
   mailstream_ssl_set_server_name(ctx, (char *)o->host);
   if (mailstream_ssl_set_server_certicate(ctx, (char *)o->ca_file, NULL) < 0)
-    o->ca_failed = 1;
+    o->ca_unsupported = 1;
 }
 
 int tpi_connect(tpi_session *s, const char *host, uint16_t port, long timeout_sec,
@@ -76,8 +80,7 @@ int tpi_connect(tpi_session *s, const char *host, uint16_t port, long timeout_se
   mailimap_set_timeout(s->imap, (time_t)timeout_sec);
   struct tls_options opts = {host, ca_file, 0};
   int r = mailimap_ssl_connect_with_callback(s->imap, host, port, tls_setup, &opts);
-  if (opts.ca_failed)
-    return TPI_ERR_TLS;
+  s->chain_verified = !opts.ca_unsupported;
   if (r == MAILIMAP_NO_ERROR_AUTHENTICATED || r == MAILIMAP_NO_ERROR_NON_AUTHENTICATED)
     return TPI_OK;
   switch (r) {
@@ -107,6 +110,43 @@ long tpi_peer_certificate(tpi_session *s, char **der) {
   }
   mailstream_certificate_chain_free(chain);
   return n;
+}
+
+int tpi_chain_verified(tpi_session *s) { return s->chain_verified; }
+
+long tpi_peer_chain(tpi_session *s, tpi_der **out) {
+  *out = NULL;
+  carray *chain = mailstream_get_certificate_chain(s->imap->imap_stream);
+  if (chain == NULL)
+    return -1;
+  size_t n = carray_count(chain);
+  tpi_der *items = calloc(n > 0 ? n : 1, sizeof(*items));
+  if (items == NULL) {
+    mailstream_certificate_chain_free(chain);
+    return -1;
+  }
+  for (size_t i = 0; i < n; i++) {
+    MMAPString *c = carray_get(chain, (unsigned int)i);
+    items[i].data = malloc(c->len > 0 ? c->len : 1);
+    if (items[i].data == NULL) {
+      tpi_chain_free(items, i);
+      mailstream_certificate_chain_free(chain);
+      return -1;
+    }
+    memcpy(items[i].data, c->str, c->len);
+    items[i].len = c->len;
+  }
+  mailstream_certificate_chain_free(chain);
+  *out = items;
+  return (long)n;
+}
+
+void tpi_chain_free(tpi_der *items, size_t count) {
+  if (items == NULL)
+    return;
+  for (size_t i = 0; i < count; i++)
+    free(items[i].data);
+  free(items);
 }
 
 int tpi_attach_fd(tpi_session *s, int fd) {

@@ -24,7 +24,8 @@ tpi_session *tpi_new(void);
 void tpi_free(tpi_session *s);
 
 /* Implicit TLS connect. The server certificate chain is verified against the
- * PEM bundle ca_file and SNI is set to host; a failure returns TPI_ERR_TLS.
+ * PEM bundle ca_file (where the TLS backend supports it; see
+ * tpi_chain_verified) and SNI is set to host; a failure returns TPI_ERR_TLS.
  * The certificate's host name is NOT checked here: the caller must check it
  * (tpi_peer_certificate) before sending credentials. timeout_sec applies to
  * every network operation. */
@@ -34,6 +35,21 @@ int tpi_connect(tpi_session *s, const char *host, uint16_t port, long timeout_se
 /* Tests only: runs the session over an already-connected plain socket fd
  * (taken over; closed by tpi_free) and reads the server greeting. */
 int tpi_attach_fd(tpi_session *s, int fd);
+
+/* 1 if libetpan verified the certificate chain against ca_file during
+ * tpi_connect; 0 if its TLS backend cannot (GnuTLS): the caller must then
+ * verify tpi_peer_chain itself before sending credentials. */
+int tpi_chain_verified(tpi_session *s);
+
+typedef struct {
+  char *data; /* DER */
+  size_t len;
+} tpi_der;
+
+/* The server's certificate chain as sent, leaf first. Returns the count (or
+ * -1); release with tpi_chain_free(items, count). */
+long tpi_peer_chain(tpi_session *s, tpi_der **out);
+void tpi_chain_free(tpi_der *items, size_t count);
 
 /* DER encoding of the connected server's certificate. Returns its length, or
  * -1 if unavailable. Release *der with tpi_buf_free. */

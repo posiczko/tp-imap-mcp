@@ -5,6 +5,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const c = @import("c.zig");
+pub const trust = @import("trust.zig");
 
 /// Test seam: in test builds a Session can be backed by an in-memory server
 /// instead of libetpan (src/imap/fake.zig). Production builds have no fake.
@@ -109,10 +110,13 @@ pub const Session = struct {
 
     /// Implicit-TLS connect: chain verified against `ca_file`, SNI set, and
     /// the certificate's host name checked before any credential is sent.
-    pub fn connect(host: [:0]const u8, port: u16, timeout_sec: c_long, ca_file: [:0]const u8) Error!Session {
+    /// Where libetpan's TLS backend cannot verify the chain (GnuTLS), it is
+    /// verified here against `ca`'s bundle instead.
+    pub fn connect(host: [:0]const u8, port: u16, timeout_sec: c_long, ca_file: [:0]const u8, ca: *trust.Trust) Error!Session {
         const h = c.tpi_new() orelse return error.OutOfMemory;
         errdefer c.tpi_free(h);
         try check(c.tpi_connect(h, host, port, timeout_sec, ca_file));
+        if (c.tpi_chain_verified(h) == 0) try verifyPeerChain(h, ca);
         var der: ?[*]u8 = null;
         const n = c.tpi_peer_certificate(h, &der);
         defer c.tpi_buf_free(der);
@@ -365,6 +369,20 @@ pub const Session = struct {
 /// Precondition: `der` is a certificate OpenSSL already verified against the
 /// CA bundle (re-encoded by i2d_X509), so it is well-formed; std's parser may
 /// panic on arbitrary malformed bytes.
+fn verifyPeerChain(h: *c.Session, ca: *trust.Trust) Error!void {
+    var items: ?[*]c.Der = null;
+    const n = c.tpi_peer_chain(h, &items);
+    defer c.tpi_chain_free(items, if (n > 0) @intCast(n) else 0);
+    const list = items orelse return error.TlsFailed;
+    if (n <= 0) return error.TlsFailed;
+    const chain = try ca.gpa.alloc([]const u8, @intCast(n));
+    defer ca.gpa.free(chain);
+    for (chain, list[0..@intCast(n)]) |*d, item| d.* = (item.data orelse return error.TlsFailed)[0..item.len];
+    const bundle = ca.get() catch return error.TlsFailed;
+    const now = std.Io.Timestamp.now(ca.io, .real).toSeconds();
+    trust.verifyChain(bundle, chain, now) catch return error.TlsFailed;
+}
+
 pub fn checkHostName(der: []const u8, host: []const u8) error{HostnameMismatch}!void {
     const cert: std.crypto.Certificate = .{ .buffer = der, .index = 0 };
     const parsed = cert.parse() catch return error.HostnameMismatch;

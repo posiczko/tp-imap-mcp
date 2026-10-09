@@ -131,7 +131,12 @@ pub const default_max_body_bytes = 32 * 1024;
 pub const default_max_response_bytes = 128 * 1024;
 
 /// Homebrew's `ca-certificates` bundle on Apple Silicon.
-pub const default_ca_file = "/opt/homebrew/etc/ca-certificates/cert.pem";
+/// Homebrew's ca-certificates on macOS; the distribution bundle elsewhere
+/// (Debian/Ubuntu ca-certificates).
+pub const default_ca_file = switch (@import("builtin").target.os.tag) {
+    .macos => "/opt/homebrew/etc/ca-certificates/cert.pem",
+    else => "/etc/ssl/certs/ca-certificates.crt",
+};
 
 pub const app_dir = "tp-imap-mcp";
 

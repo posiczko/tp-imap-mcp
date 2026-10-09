@@ -20,7 +20,7 @@ here. Superseded ADRs stay, marked "Superseded by NNNN".
 | [0013](0013-cache-mailbox-list-and-message-metadata.md) | Cache the mailbox list and message headers and sizes | Accepted |
 | [0014](0014-xdg-base-directories.md) | Store local data in XDG base directories | Accepted |
 | [0015](0015-sqlite-for-the-cache.md) | Use SQLite (system libsqlite3) for the cache | Accepted |
-| [0016](0016-verify-server-tls-certificates.md) | Verify server TLS certificates (chain, SNI, host name) | Accepted |
+| [0016](0016-verify-server-tls-certificates.md) | Verify server TLS certificates (chain, SNI, host name) | Accepted (amended: chain check in Zig on GnuTLS/Linux) |
 | [0017](0017-sensitive-content-filters.md) | Withhold sensitive messages with header-based filters | Accepted |
 | [0018](0018-sanitize-model-bound-output.md) | Sanitize all model-bound output | Accepted |
 | [0019](0019-decoded-sanitized-header-values.md) | Return header values decoded and sanitized | Accepted |

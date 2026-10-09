@@ -4,7 +4,7 @@ An MCP server that lets an AI assistant read, search and organize several IMAP
 mailboxes. TLS is verified, headers are cached locally, sensitive mail is kept
 from the model by filters, and credentials can come from 1Password.
 
-Zig 0.17 · macOS on Apple Silicon · MCP over stdio · MIT license
+Zig 0.17 · macOS (Apple Silicon) and Linux (Ubuntu) · MCP over stdio · MIT license
 
 > [!CAUTION]
 > # TINKERING PROJECT — USE AT YOUR OWN RISK
@@ -41,6 +41,7 @@ Zig 0.17 · macOS on Apple Silicon · MCP over stdio · MIT license
   - [Organizing mail](#organizing-mail)
   - [Organize my mailbox](#organize-my-mailbox)
 - [Security model](#security-model)
+- [TLS and certificates](#tls-and-certificates)
 - [Troubleshooting](#troubleshooting)
 - [Tech stack](#tech-stack)
 - [Roadmap](#roadmap)
@@ -70,7 +71,7 @@ tp-imap-mcp exposes IMAP mailboxes to MCP clients (Claude Code, Claude Desktop, 
 ## Quick start
 
 ```bash
-brew install zig libetpan ca-certificates
+brew install zig libetpan ca-certificates                    # Ubuntu: sudo apt install libetpan-dev libsqlite3-dev ca-certificates pkg-config, plus Zig 0.17
 zig build -Doptimize=safe --prefix ~/.local                  # installs ~/.local/bin/tp_imap_mcp
 mkdir -p ~/.config/tp-imap-mcp
 cp imap.env.example ~/.config/tp-imap-mcp/imap.env    # edit: account names, hosts, logins, passwords
@@ -88,14 +89,16 @@ The full walkthrough follows.
 
 ### 1. Prerequisites
 
-| Requirement | Install | Check |
-|---|---|---|
-| macOS on Apple Silicon | — | `uname -m` → `arm64` |
-| Zig **0.17.0** | `brew install zig` | `zig version` → `0.17.0` |
-| libetpan (IMAP/MIME) | `brew install libetpan` | `pkg-config --modversion libetpan` → `1.10.x` |
-| CA certificates (TLS) | `brew install ca-certificates` | `ls /opt/homebrew/etc/ca-certificates/cert.pem` |
-| SQLite | ships with macOS | — |
-| 1Password CLI *(optional)* | `brew install 1password-cli` | `op --version` — only for [secrets in 1Password](#keeping-secrets-in-1password-optional) |
+| Requirement | macOS (Apple Silicon) | Ubuntu / Debian | Check |
+|---|---|---|---|
+| Zig **0.17.0** | `brew install zig` | [ziglang.org/download](https://ziglang.org/download/) or `snap install zig --classic` | `zig version` → `0.17.0` |
+| libetpan (IMAP/MIME) | `brew install libetpan` | `apt install libetpan-dev` | `pkg-config --modversion libetpan` → `1.10.x` (macOS), `1.9.x` (Ubuntu) |
+| CA certificates (TLS) | `brew install ca-certificates` | `apt install ca-certificates` | `ls /opt/homebrew/etc/ca-certificates/cert.pem` / `ls /etc/ssl/certs/ca-certificates.crt` |
+| SQLite, pkg-config | ships with macOS / Homebrew | `apt install libsqlite3-dev pkg-config` | — |
+| 1Password CLI *(optional)* | `brew install 1password-cli` | [1Password CLI for Linux](https://developer.1password.com/docs/cli/get-started/) | `op --version` — only for [secrets in 1Password](#keeping-secrets-in-1password-optional) |
+
+> [!NOTE]
+> On Linux, libetpan is built with GnuTLS, which cannot check the server's certificate chain against a CA file. The server then checks the chain itself (Zig `std.crypto`) before sending any credential; this covers chain, validity and CA flags, but not revocation. See [TLS and certificates](#tls-and-certificates).
 
 ### 2. Build
 
@@ -287,7 +290,7 @@ All configuration is environment variables, usually loaded from `~/.config/tp-im
 | `IMAP_<NAME>_DRAFTS` | no | Drafts folder; default is the server's `\Drafts` folder, else `Drafts` |
 | `TP_IMAP_MCP_CACHE` | no | `0` disables the on-disk cache |
 | `TP_IMAP_MCP_MAILBOX_TTL` | no | Seconds the cached mailbox list stays fresh (default `3600`) |
-| `TP_IMAP_MCP_CA_FILE` | no | PEM bundle for TLS verification (default `/opt/homebrew/etc/ca-certificates/cert.pem`) |
+| `TP_IMAP_MCP_CA_FILE` | no | PEM bundle for TLS verification (default `/opt/homebrew/etc/ca-certificates/cert.pem` on macOS, `/etc/ssl/certs/ca-certificates.crt` on Linux) |
 | `XDG_CACHE_HOME` | no | Cache location base (default `~/.cache`) |
 | `TP_IMAP_MCP_FILTERS` | no | Active sensitive-content filters, comma-separated, or `none` (default `password_reset,one_time_codes`) |
 | `IMAP_<NAME>_FILTERS` | no | Per-account override of `TP_IMAP_MCP_FILTERS` |
@@ -507,7 +510,7 @@ Write your own instructions in `~/.config/tp-imap-mcp/organize.md`, or `organize
 
 ## Security model
 
-- **TLS:** the server certificate must chain to the CA bundle and match the configured host; otherwise the connection is refused and no credentials are sent.
+- **TLS:** the server certificate must chain to the CA bundle and match the configured host; otherwise the connection is refused and no credentials are sent. See [TLS and certificates](#tls-and-certificates).
 - **Secrets:** the server reads them from its environment and never logs or returns them. In `imap.env` they are plain text on disk (mode `0600`); with [1Password references](#keeping-secrets-in-1password-optional) the file holds none and `op run` passes them only to the process. In memory, the server wipes token buffers and its own copies when done; the environment copy lives as long as the process.
 - **Command injection:** search criteria cannot contain CR/LF/NUL; UIDs, keywords, and header names are validated.
 - **Read-only accounts:** accounts are read-only unless `IMAP_<NAME>_READONLY=0`; write tools refuse before contacting the server (dry runs of `move_messages` / `copy_messages` / `apply_organization` are allowed).
@@ -517,6 +520,43 @@ Write your own instructions in `~/.config/tp-imap-mcp/organize.md`, or `organize
 - **Sensitive mail:** filtered messages' bodies are never downloaded; their subjects are never shown.
 - **Prompt injection:** output is plain text with hidden HTML content and invisible Unicode removed. Text hidden only by CSS colour (white on white) or off-screen positioning is *not* detected.
 
+## TLS and certificates
+
+The server only speaks IMAP over implicit TLS (port 993 by default); STARTTLS on port 143 is not supported. Before it sends a password or OAuth token, it checks that it is talking to the server you configured:
+
+1. **Chain of trust.** The server's certificate must be signed, possibly through intermediate certificates, by a certificate authority (CA) in a trusted bundle. Every certificate in the chain must be within its validity dates, and every certificate that signs another must be a CA.
+2. **Host name.** The server's own certificate must be issued for `IMAP_<NAME>_HOST` (its DNS or IP subject alternative names, else its common name).
+3. **SNI.** The host name is sent in the TLS handshake, so servers that host several domains present the right certificate.
+
+If any check fails, the connection is closed and nothing is sent. The tool error says which check failed: `the certificate is not trusted by <bundle>` or `the TLS certificate … is not valid for host …`.
+
+**The CA bundle** is a PEM file of trusted root certificates, the same kind your operating system and browser use:
+
+| Platform | Default bundle | Provided by |
+|---|---|---|
+| macOS | `/opt/homebrew/etc/ca-certificates/cert.pem` | `brew install ca-certificates` (Mozilla's root list) |
+| Linux | `/etc/ssl/certs/ca-certificates.crt` | `apt install ca-certificates` |
+
+`TP_IMAP_MCP_CA_FILE` points at a different bundle. The same bundle is used for OAuth token requests (HTTPS).
+
+**Who checks what.** On macOS, libetpan's OpenSSL backend checks the chain during the handshake. On Linux, distributions build libetpan with GnuTLS, which cannot take a CA file; the handshake then completes unchecked, and the server checks the chain itself with Zig's `std.crypto` before going further. The host-name check is always done by the server. Neither path checks revocation (CRL/OCSP), so a revoked but unexpired certificate is still accepted; on Linux, name and policy constraints are not checked either. Details: ADR 0016.
+
+**Self-signed or private-CA servers** (a home server, a company CA) are refused with the default bundle. Add their CA to a bundle of your own instead of turning checks off (there is no switch for that):
+
+```bash
+cat /opt/homebrew/etc/ca-certificates/cert.pem my-ca.pem > ~/.config/tp-imap-mcp/ca.pem   # Linux: /etc/ssl/certs/ca-certificates.crt
+# in imap.env:
+TP_IMAP_MCP_CA_FILE=/Users/you/.config/tp-imap-mcp/ca.pem
+```
+
+`my-ca.pem` is the CA that signed the server's certificate, not the server's certificate itself. To see what a server presents:
+
+```bash
+openssl s_client -connect imap.example.org:993 -servername imap.example.org -showcerts </dev/null
+```
+
+Connect by the name on the certificate: `IMAP_<NAME>_HOST=mail.example.org` works for a certificate issued to `mail.example.org`, but an IP address or another alias of the same machine does not, unless the certificate lists it too.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
@@ -525,7 +565,7 @@ Write your own instructions in `~/.config/tp-imap-mcp/organize.md`, or `organize
 | `imap.env: No such file or directory` | Wrong path in the `sh -c` command; GUI clients need absolute paths (no `~` or `$HOME`). |
 | Server fails to start only inside the MCP client | Use absolute paths for the env file and the binary; with 1Password, see [its troubleshooting](#keeping-secrets-in-1password-optional). |
 | `IMAP_X is missing or empty` / `must be …` | Configuration error; the message names the variable. |
-| `CA bundle … is not readable` | `brew install ca-certificates`, or point `TP_IMAP_MCP_CA_FILE` at a PEM bundle. |
+| `CA bundle … is not readable` | `brew install ca-certificates` (macOS) or `apt install ca-certificates` (Linux), or point `TP_IMAP_MCP_CA_FILE` at a PEM bundle. |
 | `TLS handshake … failed; the certificate is not trusted` | The server's certificate doesn't chain to your CA bundle (self-signed or private CA): add that CA to a bundle and set `TP_IMAP_MCP_CA_FILE`. |
 | `the TLS certificate … is not valid for host …` | `IMAP_<NAME>_HOST` doesn't match a name in the certificate — use the host name the certificate is issued for. |
 | `account "x" is read-only; set IMAP_X_READONLY=0 to allow changes` | Accounts are read-only by default; add `IMAP_X_READONLY=0` to `imap.env` and restart the client. |
