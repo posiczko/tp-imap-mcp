@@ -134,7 +134,7 @@ const Ctx = struct {
 
     fn writable(ctx: *Ctx, idx: usize) Failure!void {
         const a = ctx.registry.accounts[idx];
-        if (a.readonly) return ctx.failed("account \"{s}\" is read-only", .{a.name});
+        if (a.readonly) return ctx.failed("account \"{s}\" is read-only; set IMAP_{s}_READONLY=0 to allow changes", .{ a.name, try std.ascii.allocUpperString(ctx.arena, a.name) });
     }
 
     /// UTF-8 mailbox argument -> wire (modified UTF-7), NUL-terminated.
@@ -2119,11 +2119,11 @@ test "errors that never reach the server" {
         (try callJson(&reg, a, "whoami", "{\"account\":\"x\"}")).?.tool_error,
     );
     try testing.expectEqualStrings(
-        "account \"ro\" is read-only",
+        "account \"ro\" is read-only; set IMAP_RO_READONLY=0 to allow changes",
         (try callJson(&reg, a, "create_message", "{\"account\":\"ro\",\"content\":\"x\"}")).?.tool_error,
     );
     try testing.expectEqualStrings(
-        "account \"ro\" is read-only",
+        "account \"ro\" is read-only; set IMAP_RO_READONLY=0 to allow changes",
         (try callJson(&reg, a, "change_keywords", "{\"account\":\"ro\",\"directory\":\"INBOX\",\"uids\":[\"1\"],\"keywords\":[\"\\\\Seen\"],\"set\":true}")).?.tool_error,
     );
     try testing.expectEqualStrings(
@@ -2353,7 +2353,7 @@ test "organization tools: read-only accounts refuse changes but allow dry runs" 
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const ro = "account \"ro\" is read-only";
+    const ro = "account \"ro\" is read-only; set IMAP_RO_READONLY=0 to allow changes";
     try testing.expectEqualStrings(ro, (try callJson(&reg, a, "create_mailbox", "{\"account\":\"ro\",\"name\":\"X\"}")).?.tool_error);
     try testing.expectEqualStrings(ro, (try callJson(&reg, a, "rename_mailbox", "{\"account\":\"ro\",\"name\":\"X\",\"new_name\":\"Y\"}")).?.tool_error);
     try testing.expectEqualStrings(ro, (try callJson(&reg, a, "delete_mailbox", "{\"account\":\"ro\",\"name\":\"X\"}")).?.tool_error);
@@ -2514,7 +2514,7 @@ test "organize tools: read-only accounts gather and dry-run but never execute" {
     try testing.expectEqualStrings(unreachable_ro, (try callJson(&reg, a, "organize_mailbox", "{\"account\":\"ro\"}")).?.tool_error);
     const apply = "{\"account\":\"ro\",\"directory\":\"INBOX\",\"uidvalidity\":7,\"actions\":[{\"uid\":\"1\",\"action\":\"flag\"}]";
     try testing.expectEqualStrings(unreachable_ro, (try callJson(&reg, a, "apply_organization", apply ++ "}")).?.tool_error);
-    try testing.expectEqualStrings("account \"ro\" is read-only", (try callJson(&reg, a, "apply_organization", apply ++ ",\"execute\":true,\"plan_hash\":\"0123456789abcdef\"}")).?.tool_error);
+    try testing.expectEqualStrings("account \"ro\" is read-only; set IMAP_RO_READONLY=0 to allow changes", (try callJson(&reg, a, "apply_organization", apply ++ ",\"execute\":true,\"plan_hash\":\"0123456789abcdef\"}")).?.tool_error);
 }
 
 test "apply_organization runs flag, then moves, then delete, then keep" {

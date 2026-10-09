@@ -26,3 +26,21 @@ mailbox flagged `\Drafts` (RFC 6154), otherwise `Drafts`.
 - `create_message` works across servers without per-server code.
 - The folder and move/copy tools added later follow the same read-only
   switch; their own safeguards are in [ADR 0021](0021-mailbox-organization-tools.md).
+
+## Amendment (2026-10-09): read-only by default
+
+The switch is inverted: every account is read-only unless
+`IMAP_<NAME>_READONLY` is set to `0`/`false`/`no`. An unset or empty value
+means read-only; `1`/`true`/`yes` stays valid (read-only); anything else still
+stops startup. Since the folder and move/copy tools (ADR 0021) and
+`apply_organization` (ADR 0022) can rearrange a whole mailbox, write access is
+now something the user opts into per account rather than out of.
+
+- The refusal names the switch: `account "x" is read-only; set
+  IMAP_X_READONLY=0 to allow changes`.
+- The startup line lists the read/write accounts (`read/write: none` when
+  there are none), so a forgotten switch is visible at launch.
+- `itest --write` / `--organize` stop early on a read-only account.
+- Breaking for existing configurations: an account that relied on the old
+  default (writable) becomes read-only until `IMAP_<NAME>_READONLY=0` is
+  added.

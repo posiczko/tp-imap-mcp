@@ -14,6 +14,19 @@
 
 </div>
 
+> [!CAUTION]
+> # ⚠️ TINKERING PROJECT — USE AT YOUR OWN RISK ⚠️
+>
+> ## This is a hobby project for learning Zig. It is not a product, not audited, and comes with no support or warranty.
+>
+> ## Prompt injection is real.
+>
+> Every email the assistant reads is text written by **someone else**, and the model cannot reliably tell their instructions from yours. A crafted message can try to make your assistant leak what it has read, or — on a read/write account — flag, file or move your mail, including into Trash. This server's [sanitizing and filters](#-security-model) reduce the risk; **they do not and cannot eliminate it.** Keep accounts read-only (the default) unless you need changes, and review what the assistant does (the [audit log](#7-day-to-day-operation) records every tool call).
+>
+> Read before pointing this at a real mailbox:
+> - Simon Willison, [Prompt injection (series)](https://simonwillison.net/series/prompt-injection/)
+> - Liu et al., [Prompt Injection attack against LLM-integrated Applications](https://arxiv.org/html/2306.05499v3) (arXiv 2306.05499)
+
 ---
 
 ## 💡 Concept
@@ -30,7 +43,7 @@ tp-imap-mcp exposes IMAP mailboxes to MCP clients (Claude Code, Claude Desktop, 
 | 🔐 Credentials | Environment variables from a private (`0600`) env file — or `op://` references resolved by `op run`, keeping secrets in 1Password. |
 | 🛡️ Verified TLS | Certificate chain checked against a CA bundle, SNI set, host name verified **before** the password is sent. |
 | 🗂️ Mail organization | Create, rename/move and delete folders; move or copy messages by UID or by search criteria, with dry runs and protected system folders. |
-| 👀 Read-only accounts | `IMAP_<NAME>_READONLY=1` refuses every tool that changes the mailbox; reads never mark mail as seen. |
+| 👀 Read-only by default | Every account refuses the tools that change the mailbox until you set `IMAP_<NAME>_READONLY=0`; reads never mark mail as seen. |
 | ⚡ Local cache | Mailbox list and message headers/sizes cached in SQLite under `~/.cache/tp-imap-mcp/`. |
 | 🔎 Full IMAP search | The model's IMAP `SEARCH` criteria are passed through, with input validation against command injection. |
 | 🙈 Sensitive-content filters | Password-reset and one-time-code emails (and anything you define) are withheld: the model learns they exist, never their content. On by default. |
@@ -103,14 +116,16 @@ IMAP_ACCOUNTS=work,personal
 IMAP_WORK_HOST=imap.example.org
 IMAP_WORK_LOGIN=me@example.org
 IMAP_WORK_PASSWORD='correct horse battery staple'
+IMAP_WORK_READONLY=0          # allow changes (flags, drafts, folders, moves)
 
 IMAP_PERSONAL_HOST=imap.fastmail.com
 IMAP_PERSONAL_LOGIN=me@fastmail.com
 IMAP_PERSONAL_PASSWORD='app-password-here'
-IMAP_PERSONAL_READONLY=1
+# read-only: no IMAP_PERSONAL_READONLY line needed
 ```
 
 - One `IMAP_<NAME>_*` block per name in `IMAP_ACCOUNTS`; `<NAME>` is upper-cased.
+- Accounts are **read-only by default**: the assistant can read and search, but cannot flag, draft, create folders or move mail until you set `IMAP_<NAME>_READONLY=0` for that account.
 - One `KEY=value` per line, no spaces around `=`. Put a value in **single quotes** if it contains spaces or shell characters such as `$`, `"`, `\`, `#`, `&`, `;`, `|` or a backtick. (`op run` reads the same file and strips the quotes too.)
 - Gmail / Outlook: use an **app password**, or OAuth 2.0 (XOAUTH2) where app passwords are disabled — see [OAuth accounts](#oauth-accounts) and the [Gmail XOAUTH2 runbook](docs/runbooks/gmail-xoauth2.md).
 - See [Configuration](#-configuration) for every variable.
@@ -121,7 +136,7 @@ Start the server once with no input; it validates everything, prints one line to
 
 ```bash
 sh -c 'set -a; . ./imap.env; exec ./zig-out/bin/tp_imap_mcp' </dev/null
-# tp-imap-mcp: serving 2 account(s) on stdio; cache: /Users/you/.cache/tp-imap-mcp
+# tp-imap-mcp: serving 2 account(s) on stdio; cache: /Users/you/.cache/tp-imap-mcp; …; read/write: work
 ```
 
 Then run the live read-only checks against each account (they print only PASS/FAIL, never message content, and use a throwaway cache):
@@ -132,7 +147,7 @@ sh -c 'set -a; . ./imap.env; exec zig build itest -- work'
 # 0 failure(s)
 ```
 
-`--organize` adds 20 PASS lines. It also checks the folder and move/copy tools. It creates two folders named `tp-imap-mcp-itest-<random>`, appends one test message, moves, copies and renames, and removes everything again (it never touches other folders):
+`--organize` adds 20 PASS lines; like `--write`, it needs the account to be read/write (`IMAP_<NAME>_READONLY=0`). It also checks the folder and move/copy tools. It creates two folders named `tp-imap-mcp-itest-<random>`, appends one test message, moves, copies and renames, and removes everything again (it never touches other folders):
 
 ```bash
 sh -c 'set -a; . ./imap.env; exec zig build itest -- work --organize'
@@ -195,9 +210,9 @@ Ask your assistant things like:
 - "List my mail accounts."
 - "How many unread messages are in my work INBOX?"
 - "Find emails from alice@example.org since 1 October and summarize them."
-- "Flag the newest message from Bob." *(not on read-only accounts)*
+- "Flag the newest message from Bob." *(read/write accounts only)*
 - "Draft a reply to that message." *(creates a draft; it never sends mail)*
-- "File every receipt from this year into Receipts/2026." *(not on read-only accounts)*
+- "File every receipt from this year into Receipts/2026." *(read/write accounts only)*
 
 <details>
 <summary>Talking to the server by hand (no MCP client)</summary>
@@ -225,7 +240,7 @@ npx @modelcontextprotocol/inspector sh -c 'set -a; . ./imap.env; exec ./zig-out/
 | Update after code changes | `zig build -Doptimize=safe --prefix ~/.local`, then restart / reconnect the client (`/mcp` in Claude Code) |
 | Add an account | Add its name to `IMAP_ACCOUNTS` and an `IMAP_<NAME>_*` block; restart the client |
 | Change a password | Edit `imap.env` (or the 1Password item); restart the client |
-| Make an account read-only | `IMAP_<NAME>_READONLY=1`; restart |
+| Allow changes on an account | `IMAP_<NAME>_READONLY=0` (read-only is the default); restart |
 | See new folders immediately | Ask the assistant to list mailboxes with refresh, or wait for the TTL (1 h) |
 | Clear cached data | Ask the assistant to clear the cache, or `rm ~/.cache/tp-imap-mcp/<account>.sqlite3*` |
 | Disable the cache | `TP_IMAP_MCP_CACHE=0` |
@@ -250,7 +265,7 @@ All configuration is environment variables, usually loaded from `~/.config/tp-im
 | `IMAP_<NAME>_OAUTH_TENANT` | no | Microsoft tenant (default `common`) |
 | `IMAP_<NAME>_OAUTH_AUTH_URL`, `_TOKEN_URL`, `_SCOPE` | custom | Endpoints (https) and scopes for a custom provider |
 | `IMAP_<NAME>_PORT` | no | Default `993` (implicit TLS) |
-| `IMAP_<NAME>_READONLY` | no | `1`/`true`/`yes` makes the account read-only |
+| `IMAP_<NAME>_READONLY` | no | Default read-only; `0`/`false`/`no` allows changes (`1`/`true`/`yes` is read-only) |
 | `IMAP_<NAME>_DRAFTS` | no | Drafts folder; default is the server's `\Drafts` folder, else `Drafts` |
 | `TP_IMAP_MCP_CACHE` | no | `0` disables the on-disk cache |
 | `TP_IMAP_MCP_MAILBOX_TTL` | no | Seconds the cached mailbox list stays fresh (default `3600`) |
@@ -274,7 +289,7 @@ IMAP_ACCOUNTS=work
 IMAP_WORK_HOST=imap.example.org
 IMAP_WORK_LOGIN=me@example.org
 IMAP_WORK_PASSWORD='correct horse battery staple'
-# IMAP_WORK_READONLY=1
+# IMAP_WORK_READONLY=0       # uncomment to allow changes
 ```
 
 </details>
@@ -477,7 +492,7 @@ Write your own instructions in `~/.config/tp-imap-mcp/organize.md`, or `organize
 - **TLS:** the server certificate must chain to the CA bundle and match the configured host; otherwise the connection is refused and no credentials are sent.
 - **Secrets:** the server reads them from its environment and never logs or returns them. In `imap.env` they are plain text on disk (mode `0600`); with [1Password references](#-keeping-secrets-in-1password-optional) the file holds none and `op run` passes them only to the process. In memory, the server wipes token buffers and its own copies when done; the environment copy lives as long as the process.
 - **Command injection:** search criteria cannot contain CR/LF/NUL; UIDs, keywords, and header names are validated.
-- **Read-only accounts:** write tools refuse before contacting the server (dry runs of `move_messages` / `copy_messages` / `apply_organization` are allowed).
+- **Read-only accounts:** accounts are read-only unless `IMAP_<NAME>_READONLY=0`; write tools refuse before contacting the server (dry runs of `move_messages` / `copy_messages` / `apply_organization` are allowed).
 - **Organizing:** see [Organizing mail](#organizing-mail): previews for bulk moves, no plain `EXPUNGE`, protected system folders, and no automatic retry of a folder or move/copy command after a dropped connection.
 - **Cache:** `~/.cache/tp-imap-mcp/<account>.sqlite3`, mode `0600`. It contains message headers (subjects, addresses); delete it any time or set `TP_IMAP_MCP_CACHE=0`.
 - **Audit log:** `~/.local/state/tp-imap-mcp/audit.log`, mode `0600`: one JSON line per tool call with its arguments (search criteria and folder names included), outcome and duration. Changes are logged with their result; reads only with the result's size, so no message content is written. Rotates at 10 MB (two old files kept); `TP_IMAP_MCP_AUDIT=0` disables it. See ADR 0023.
@@ -495,6 +510,7 @@ Write your own instructions in `~/.config/tp-imap-mcp/organize.md`, or `organize
 | `CA bundle … is not readable` | `brew install ca-certificates`, or point `TP_IMAP_MCP_CA_FILE` at a PEM bundle. |
 | `TLS handshake … failed; the certificate is not trusted` | The server's certificate doesn't chain to your CA bundle (self-signed or private CA): add that CA to a bundle and set `TP_IMAP_MCP_CA_FILE`. |
 | `the TLS certificate … is not valid for host …` | `IMAP_<NAME>_HOST` doesn't match a name in the certificate — use the host name the certificate is issued for. |
+| `account "x" is read-only; set IMAP_X_READONLY=0 to allow changes` | Accounts are read-only by default; add `IMAP_X_READONLY=0` to `imap.env` and restart the client. |
 | `login failed: …` | Wrong credentials, or the provider requires an app password (or OAuth). |
 | `the OAuth refresh token was rejected (expired or revoked)` | Run `auth` again ([OAuth accounts](#oauth-accounts)) and replace the stored token. |
 | `cannot connect to host:port` | Host/port wrong, or port 993 blocked. Only implicit TLS (993-style) is supported, not STARTTLS. |
@@ -567,7 +583,7 @@ CI (`.github/workflows/ci.yml`) runs the unit tests, an optimized build, and a s
 - [x] All tools of the reference server, multi-account
 - [x] Credentials from environment variables, optionally from 1Password
 - [x] Verified TLS (chain, SNI, host name)
-- [x] Read-only accounts
+- [x] Read-only accounts (the default)
 - [x] SQLite cache for mailbox list and headers/sizes (XDG)
 - [x] Sensitive-content filters — [spec](docs/superpowers/specs/2026-10-07-sensitive-content-filters-design.md) · [ADR 0017](docs/adr/0017-sensitive-content-filters.md)
 - [x] Output sanitization — [spec](docs/superpowers/specs/2026-10-07-output-sanitization-design.md) · [ADR 0018](docs/adr/0018-sanitize-model-bound-output.md) · [ADR 0019](docs/adr/0019-decoded-sanitized-header-values.md)

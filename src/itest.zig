@@ -111,6 +111,10 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("unknown account {s}\n", .{account});
         return 2;
     };
+    if ((write_box != null or organize_checks) and accounts[idx].readonly) {
+        std.debug.print("account {s} is read-only; --write and --organize need IMAP_{s}_READONLY=0\n", .{ account, try std.ascii.allocUpperString(arena, accounts[idx].name) });
+        return 2;
+    }
     const h: Harness = .{ .reg = &reg, .arena = arena, .account = account };
     const acct = try std.json.Stringify.valueAlloc(arena, account, .{});
 

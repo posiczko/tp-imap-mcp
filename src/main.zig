@@ -48,6 +48,14 @@ pub fn main(init: std.process.Init) !u8 {
         if (fs.len == 0) try stderr.writeAll("none");
         for (fs, 0..) |f, i| try stderr.print("{s}{s}", .{ if (i > 0) "," else "", f.name });
     }
+    // Accounts are read-only by default (ADR 0010): show which are not.
+    try stderr.writeAll("; read/write:");
+    var any_writable = false;
+    for (accounts) |a| if (!a.readonly) {
+        try stderr.print(" {s}", .{a.name});
+        any_writable = true;
+    };
+    if (!any_writable) try stderr.writeAll(" none");
     try stderr.writeAll("\n");
     try stderr.flush();
 

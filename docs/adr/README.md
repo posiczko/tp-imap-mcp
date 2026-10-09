@@ -14,7 +14,7 @@ here. Superseded ADRs stay, marked "Superseded by NNNN".
 | [0007](0007-credentials-from-op-run-environment.md) | Take credentials from the environment, injected by `op run` | Accepted (amended: `op run` optional) |
 | [0008](0008-password-login-over-implicit-tls.md) | Authenticate with password LOGIN over implicit TLS only | Accepted (password-only superseded by 0020) |
 | [0009](0009-defer-pgp-decryption.md) | Defer PGP/MIME decryption | Accepted |
-| [0010](0010-write-tools-with-read-only-switch.md) | Keep the write tools, with a per-account read-only switch | Accepted |
+| [0010](0010-write-tools-with-read-only-switch.md) | Keep the write tools, with a per-account read-only switch | Accepted (amended: read-only by default) |
 | [0011](0011-raw-search-criteria-with-validation.md) | Pass search criteria through raw, and validate all inputs | Accepted |
 | [0012](0012-parity-and-deliberate-deviations.md) | Match the reference's behavior, with listed deviations | Accepted (raw headers superseded by 0019) |
 | [0013](0013-cache-mailbox-list-and-message-metadata.md) | Cache the mailbox list and message headers and sizes | Accepted |

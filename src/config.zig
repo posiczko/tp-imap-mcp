@@ -95,7 +95,8 @@ pub fn loadWith(arena: Allocator, env: anytype, diag: *std.Io.Writer, opts: Load
             .port = port_n,
             .login = login,
             .password = password,
-            .readonly = try flag(arena, env, diag, prefix, "READONLY"),
+            // Read-only unless explicitly turned off (ADR 0010).
+            .readonly = try boolVar(env, diag, try varName(arena, prefix, "READONLY"), true),
             .drafts = nonEmpty(env, try varName(arena, prefix, "DRAFTS")),
             .auth = auth,
         });
@@ -270,10 +271,6 @@ fn port(arena: Allocator, env: anytype, diag: *std.Io.Writer, prefix: []const u8
     return p;
 }
 
-fn flag(arena: Allocator, env: anytype, diag: *std.Io.Writer, prefix: []const u8, suffix: []const u8) Error!bool {
-    return boolVar(env, diag, try varName(arena, prefix, suffix), false);
-}
-
 fn boolVar(env: anytype, diag: *std.Io.Writer, key: []const u8, default: bool) Error!bool {
     const v = nonEmpty(env, key) orelse return default;
     const truthy = [_][]const u8{ "1", "true", "yes" };
@@ -306,6 +303,26 @@ fn expectInvalid(e: TestEnv, comptime expected_diag: []const u8) !void {
     try testing.expect(std.mem.find(u8, diag.buffered(), "s3cret") == null);
 }
 
+
+test "accounts are read-only unless READONLY is set to a false value" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var buf: [256]u8 = undefined;
+    var diag: std.Io.Writer = .fixed(&buf);
+    const base = .{
+        .{ "IMAP_ACCOUNTS", "a,b,c,d" },
+        .{ "IMAP_A_HOST", "h" }, .{ "IMAP_A_LOGIN", "l" }, .{ "IMAP_A_PASSWORD", "p" },
+        .{ "IMAP_B_HOST", "h" }, .{ "IMAP_B_LOGIN", "l" }, .{ "IMAP_B_PASSWORD", "p" }, .{ "IMAP_B_READONLY", "" },
+        .{ "IMAP_C_HOST", "h" }, .{ "IMAP_C_LOGIN", "l" }, .{ "IMAP_C_PASSWORD", "p" }, .{ "IMAP_C_READONLY", "false" },
+        .{ "IMAP_D_HOST", "h" }, .{ "IMAP_D_LOGIN", "l" }, .{ "IMAP_D_PASSWORD", "p" }, .{ "IMAP_D_READONLY", "yes" },
+    };
+    const accounts = try load(arena_state.allocator(), testEnv(base), &diag);
+    try testing.expect(accounts[0].readonly); // unset
+    try testing.expect(accounts[1].readonly); // empty
+    try testing.expect(!accounts[2].readonly); // false
+    try testing.expect(accounts[3].readonly); // yes
+}
+
 test "loads two accounts with defaults and overrides" {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
@@ -316,6 +333,7 @@ test "loads two accounts with defaults and overrides" {
         .{ "IMAP_TETRA_HOST", "mail.example.org" },
         .{ "IMAP_TETRA_LOGIN", "me@example.org" },
         .{ "IMAP_TETRA_PASSWORD", "s3cret" },
+        .{ "IMAP_TETRA_READONLY", "0" },
         .{ "IMAP_WORK_HOST", "imap.work.test" },
         .{ "IMAP_WORK_PORT", "1993" },
         .{ "IMAP_WORK_LOGIN", "me@work.test" },

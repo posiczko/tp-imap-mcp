@@ -133,7 +133,7 @@ token would stay in your shell history.
 
 ```bash
 sh -c 'set -a; . ./imap.env; exec ~/.local/bin/tp_imap_mcp' </dev/null
-# tp-imap-mcp: serving 2 account(s) on stdio; cache: …; filters: … gmail=password_reset,one_time_codes
+# tp-imap-mcp: serving 2 account(s) on stdio; cache: …; filters: … gmail=password_reset,one_time_codes; read/write: …
 
 sh -c 'set -a; . ./imap.env; exec zig build itest -- gmail'
 # … PASS lines …
